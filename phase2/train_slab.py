@@ -92,8 +92,10 @@ def main():
         batch_size=a.batch_size, shuffle=True, num_workers=a.workers,
         pin_memory=True, collate_fn=collate_patches,
         generator=loader_gen, worker_init_fn=worker_init)
+    # See train.py: fixed validation patches. Slabs need it more, since resampling
+    # changes which orientations get scored, not just where.
     val_loader = DataLoader(
-        SlabDataset(a.crops_dir, val_ids, augment=False, **common),
+        SlabDataset(a.crops_dir, val_ids, augment=False, deterministic=True, **common),
         batch_size=a.batch_size, shuffle=False, num_workers=a.workers,
         pin_memory=True, collate_fn=collate_patches,
         generator=loader_gen, worker_init_fn=worker_init)

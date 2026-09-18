@@ -148,8 +148,11 @@ def main():
         batch_size=a.batch_size, shuffle=True, num_workers=a.workers,
         pin_memory=True, collate_fn=collate_patches,
         generator=loader_gen, worker_init_fn=worker_init)
+    # deterministic: the same patches every epoch, so val moves only when the model
+    # does. Without it the metric carries the noise of resampling and "best epoch"
+    # partly selects the kindest draw.
     val_loader = DataLoader(
-        Phase2Dataset(a.crops_dir, val_ids, augment=False, **common),
+        Phase2Dataset(a.crops_dir, val_ids, augment=False, deterministic=True, **common),
         batch_size=a.batch_size, shuffle=False, num_workers=a.workers,
         pin_memory=True, collate_fn=collate_patches,
         generator=loader_gen, worker_init_fn=worker_init)
