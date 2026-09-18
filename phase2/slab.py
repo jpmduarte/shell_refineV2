@@ -23,6 +23,7 @@ can learn that the boundary runs across the last axis.
 
 import os
 import sys
+import zlib
 
 import numpy as np
 import torch
@@ -127,13 +128,18 @@ class SlabDataset(Dataset):
 
     def __init__(self, crops_dir: str, case_ids: list[str], long: int = LONG,
                  thin: int = THIN, patches_per_case: int = PATCHES_PER_CASE,
-                 augment: bool = False, seed: int = None):
+                 augment: bool = False, seed: int = None, deterministic: bool = False):
         self.crops_dir = crops_dir
         self.case_ids = case_ids
         self.long = long
         self.thin = thin
         self.patches_per_case = patches_per_case
         self.augment = augment
+        # See Phase2Dataset: fixed patches for validation. Slabs need it more than
+        # cubes — fewer patches per case to average over, and which orientation gets
+        # drawn depends on where the centre lands, so a resampled epoch changes the
+        # orientation mix too. Measured 2.5x the epoch-to-epoch noise of cubes.
+        self.deterministic = deterministic
         self._seed_rng = np.random.default_rng(seed)
 
     def __len__(self) -> int:
@@ -151,7 +157,9 @@ class SlabDataset(Dataset):
         }, self.long)
         img, prior, band, mask = (arrays[k] for k in ("img", "sdf_prior", "band", "mask"))
 
-        rng = np.random.default_rng(int(self._seed_rng.integers(0, 2**31 - 1)))
+        seed = (zlib.crc32(cid.encode()) if self.deterministic
+                else int(self._seed_rng.integers(0, 2**31 - 1)))
+        rng = np.random.default_rng(seed)
         placements = slab_origins(band, prior, self.patches_per_case,
                                   self.long, self.thin, rng)
 

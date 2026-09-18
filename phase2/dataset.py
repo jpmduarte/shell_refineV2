@@ -3,6 +3,7 @@ each epoch (diversity, not coverage — see phase2/make_crops.py for what a crop
 """
 
 import os
+import zlib
 
 import numpy as np
 import torch
@@ -88,12 +89,18 @@ class Phase2Dataset(Dataset):
 
     def __init__(self, crops_dir: str, case_ids: list[str], patch_size: int = PATCH_SIZE,
                  patches_per_case: int = PATCHES_PER_CASE, augment: bool = False,
-                 seed: int = None):
+                 seed: int = None, deterministic: bool = False):
         self.crops_dir        = crops_dir
         self.case_ids         = case_ids
         self.patch_size        = patch_size
         self.patches_per_case  = patches_per_case
         self.augment           = augment
+        # Validation wants the same patches every epoch. Without it the metric moves
+        # because the patches moved, not because the model did — measured at std 0.006
+        # epoch to epoch for cubes and 0.015 for slabs, which is large next to the
+        # differences these runs are meant to resolve, and it makes "best epoch"
+        # selection partly a lottery. Training keeps resampling: there it is augmentation.
+        self.deterministic = deterministic
         # Persistent stream: each __getitem__ draws the next seed, so patch sampling
         # varies epoch to epoch under a fixed base seed (not frozen to one fixed set).
         self._seed_rng = np.random.default_rng(seed)
@@ -113,7 +120,8 @@ class Phase2Dataset(Dataset):
         }, self.patch_size)
         img, prior, band, mask = arrays["img"], arrays["sdf_prior"], arrays["band"], arrays["mask"]
 
-        seed = int(self._seed_rng.integers(0, 2**31 - 1))
+        seed = (zlib.crc32(cid.encode()) if self.deterministic
+                else int(self._seed_rng.integers(0, 2**31 - 1)))
         rng = np.random.default_rng(seed)
         origins = band_patch_origins(band, self.patches_per_case, self.patch_size, rng)
 
