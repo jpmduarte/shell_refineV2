@@ -18,6 +18,9 @@ preds*/
 # Logs and profiling output
 logs/*
 !logs/.gitkeep
+
+# Job queue state — the runner recreates these; the jobs themselves are transient
+queue/
 slurm-*.out
 slurm-*.err
 
