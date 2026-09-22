@@ -32,6 +32,7 @@ PARENT = os.path.dirname(HERE)
 sys.path.insert(0, PARENT)
 
 from cache import load as load_image, load_label  # noqa: E402
+from make_sdf import load as load_sdf_target  # noqa: E402
 
 TRUNC_MM = 10.0
 
@@ -73,13 +74,25 @@ def build_one(cid: str, cache_dir: str, pred_dir: str, out_dir: str,
     mask_crop  = mask_native[slices].astype(np.uint8)
     prior_crop = sdf_prior[slices].astype(np.float32)
 
+    # The true field, for a refiner that regresses a corrected SDF rather than
+    # classifying voxels. A binary target forces a hard call on the voxels either side
+    # of the contour, which is exactly where the annotation is least certain; a distance
+    # field carries "how far, which side" there instead, and the boundary it implies is
+    # set by many voxels at once rather than one.
+    sdf_true, _ = load_sdf_target(cache_dir, cid, 1)
+    sdf_true = sdf_true[0] if sdf_true.ndim == 4 else sdf_true
+    true_crop = sdf_true[slices].astype(np.float32)
+
     coarse_crop = (prior_crop < 0).astype(np.uint8)
     band_crop   = (np.abs(sdf_mm[slices]) < band_mm).astype(np.uint8)
 
     os.makedirs(out_dir, exist_ok=True)
-    np.savez_compressed(
+    # Uncompressed: zlib over a native-resolution crop costs 484ms to load against
+    # 142ms, and inference spends more time decompressing than running the network.
+    # Disk is the cheaper resource here - 200 MB a case rather than 60.
+    np.savez(
         os.path.join(out_dir, f"{cid}.npz"),
-        img=img_crop, sdf_prior=prior_crop,
+        img=img_crop, sdf_prior=prior_crop, sdf_true=true_crop,
         coarse_mask=coarse_crop, band=band_crop, mask=mask_crop,
         bbox=np.array(bbox, dtype=np.int32),
         native_shape=np.array(native_shape, dtype=np.int32),

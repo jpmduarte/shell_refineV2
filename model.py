@@ -65,6 +65,11 @@ class UNet3D(nn.Module):
             return torch.tanh(out)
         if self.out_activation == "sigmoid":
             return torch.sigmoid(out)
+        if self.out_activation == "half_tanh":
+            # A correction to an SDF, bounded at half the truncation. Phase 2 may only
+            # rewrite |sdf| < band_mm, which is half of trunc_mm, so a larger correction
+            # could never be used: the bound is the refiner's actual reach, not a guess.
+            return 0.5 * torch.tanh(out)
         return out
 
     @staticmethod

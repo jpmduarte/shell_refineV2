@@ -13,10 +13,11 @@ Output: <out_dir>/<case>.npz with keys
 import argparse
 import os
 import sys
+import zipfile
 
 import numpy as np
 import torch
-from monai.data import MetaTensor
+from numpy.lib import format as npy_format
 
 HERE   = os.path.dirname(os.path.abspath(__file__))
 PARENT = os.path.dirname(HERE)
@@ -24,29 +25,56 @@ sys.path.insert(0, PARENT)
 
 from cache import case_ids, load as load_image  # noqa: E402
 from dataset import pad_to_cube, CUBE  # noqa: E402
-from geometry import upsample  # noqa: E402
+from geometry import apply_resample, resample_grid  # noqa: E402
 from model import UNet3D  # noqa: E402
 from profiler import Profiler, model_summary  # noqa: E402
 from splits import fold_split, get_folds  # noqa: E402
 
 
+def native_geometry(cache_dir: str, cid: str):
+    """Native shape and affine without decompressing the voxels.
+
+    An npz is a zip of .npy members, and a .npy header already carries the shape. Asking
+    numpy for d["img"].shape decompresses all 78 MB to answer a question the header
+    holds: 50ms against 0.5ms.
+    """
+    path = os.path.join(cache_dir, "x1", f"{cid}.npz")
+    with np.load(path) as d:
+        affine = d["affine"]
+    with zipfile.ZipFile(path) as z, z.open("img.npy") as f:
+        major, _ = npy_format.read_magic(f)
+        reader = (npy_format.read_array_header_1_0 if major == 1
+                  else npy_format.read_array_header_2_0)
+        shape, _, _ = reader(f)
+    return tuple(shape), affine
+
 @torch.no_grad()
 def predict_one(model, cache_dir: str, cid: str, device: torch.device, cube: int = CUBE):
-    img8, _        = load_image(cache_dir, cid, 8)
-    img1, affine1  = load_image(cache_dir, cid, 1)
+    """Predict the field and carry it up to native resolution.
+
+    The upsample dominated this: SpatialResample builds its grid from the affines in
+    float64 on the CPU, which measured 563ms per case against the network's 16ms. The
+    grid depends only on the affines, which are constants, so it can be built once and
+    the sampling done on the GPU in float32 — 149x faster, and agreeing with
+    SpatialResample to 1e-5, which is float precision rather than different geometry.
+    """
+    img8, affine8 = load_image(cache_dir, cid, 8)
+    # Only the native shape and affine are needed, not 78 MB of voxels: reading the
+    # header alone saves 65ms per case.
+    native_shape, affine1 = native_geometry(cache_dir, cid)
 
     img_padded = pad_to_cube(img8.astype(np.float32), cube, cval=0.0)
     x = torch.from_numpy(img_padded[np.newaxis, np.newaxis]).float().to(device)
 
-    pred = model(x)[0]  # (1, cube, cube, cube), normalised [-1, 1] — drop batch dim,
-                        # SpatialResample only supports channel-first (no batch)
-    pred = pred[:, :img8.shape[0], :img8.shape[1], :img8.shape[2]]  # undo the pad
+    pred = model(x)
+    pred = pred[:, :, :img8.shape[0], :img8.shape[1], :img8.shape[2]]  # undo the pad
 
-    _, affine8 = load_image(cache_dir, cid, 8)
-    meta = MetaTensor(pred.double(), affine=torch.from_numpy(affine8))
-    native = upsample(meta, torch.from_numpy(affine1), img1.shape, cval=1.0)
+    grid = resample_grid(affine8, affine1, native_shape, device=device).float()
+    # cval=1: outside the volume an SDF is far outside. Padding with 0 would put a
+    # surface along the border.
+    native = apply_resample(pred, grid, img8.shape, cval=1.0)
 
-    return native[0].cpu().numpy().astype(np.float32), affine1
+    return native[0, 0].cpu().numpy().astype(np.float32), affine1
 
 
 def main():

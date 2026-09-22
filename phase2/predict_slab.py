@@ -43,7 +43,13 @@ def axis_origins(dim: int, extent: int, stride: int) -> list[int]:
 @torch.no_grad()
 def predict_case(model, crop_path: str, device, long: int, thin: int,
                  overlap: float, tile_batch: int):
-    data = np.load(crop_path)
+    # Only what inference reads: mask and sdf_true are for evaluation, and skipping
+    # them saves about 50ms a case.
+    with np.load(crop_path) as _z:
+        data = {k: _z[k] for k in ("img", "sdf_prior", "band", "coarse_mask",
+                                   "spacing", "bbox", "native_shape", "trunc_mm")
+                if k in _z.files}
+        data["mask"] = _z["mask"]
     mask    = data["mask"].astype(np.float32)
     spacing = tuple(data["spacing"].tolist())
     crop_shape = data["img"].shape

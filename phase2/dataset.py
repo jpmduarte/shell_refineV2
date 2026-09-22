@@ -15,7 +15,8 @@ PATCHES_PER_CASE = 8
 # Zero is right for the binary masks, but for the signed distance zero means "on the
 # surface" — padding with it would invent a boundary along the volume edge. +1 is the
 # truncated "far outside" value.
-PAD_VALUES = {"img": 0.0, "sdf_prior": 1.0, "band": 0.0, "mask": 0.0, "coarse_mask": 0.0}
+PAD_VALUES = {"img": 0.0, "sdf_prior": 1.0, "band": 0.0, "mask": 0.0, "coarse_mask": 0.0,
+              "sdf_true": 1.0}
 
 
 def _augment(img, prior, mask, band, rng: np.random.Generator):
@@ -89,12 +90,18 @@ class Phase2Dataset(Dataset):
 
     def __init__(self, crops_dir: str, case_ids: list[str], patch_size: int = PATCH_SIZE,
                  patches_per_case: int = PATCHES_PER_CASE, augment: bool = False,
-                 seed: int = None, deterministic: bool = False):
+                 seed: int = None, deterministic: bool = False, target: str = "mask"):
         self.crops_dir        = crops_dir
         self.case_ids         = case_ids
         self.patch_size        = patch_size
         self.patches_per_case  = patches_per_case
         self.augment           = augment
+        # "mask": the binary label, classified per voxel. "sdf": the true distance
+        # field, regressed. Both come from the same annotation, so this does not make
+        # the target less noisy — it changes how that noise enters. A misplaced contour
+        # shifts the field locally instead of flipping a voxel's class, and the boundary
+        # the field implies is set by many voxels at once.
+        self.target = target
         # Validation wants the same patches every epoch. Without it the metric moves
         # because the patches moved, not because the model did — measured at std 0.006
         # epoch to epoch for cubes and 0.015 for slabs, which is large next to the
@@ -112,13 +119,15 @@ class Phase2Dataset(Dataset):
         cid = self.case_ids[idx]
         data = np.load(os.path.join(self.crops_dir, f"{cid}.npz"))
 
+        target_key = "sdf_true" if self.target == "sdf" else "mask"
         arrays = pad_to_patch({
             "img":       data["img"].astype(np.float32),
             "sdf_prior": data["sdf_prior"].astype(np.float32),
             "band":      data["band"].astype(np.float32),
-            "mask":      data["mask"].astype(np.float32),
+            target_key:  data[target_key].astype(np.float32),
         }, self.patch_size)
-        img, prior, band, mask = arrays["img"], arrays["sdf_prior"], arrays["band"], arrays["mask"]
+        img, prior, band = arrays["img"], arrays["sdf_prior"], arrays["band"]
+        mask = arrays[target_key]
 
         seed = (zlib.crc32(cid.encode()) if self.deterministic
                 else int(self._seed_rng.integers(0, 2**31 - 1)))

@@ -12,6 +12,7 @@ import sys
 
 import numpy as np
 import torch
+from torch.optim.swa_utils import AveragedModel, SWALR, update_bn
 from torch.utils.data import DataLoader
 
 HERE   = os.path.dirname(os.path.abspath(__file__))
@@ -96,6 +97,16 @@ def main():
                    help="0.0 (default) = off. Weight of gradient_difference_loss added on top of --loss")
     p.add_argument("--band-mm",     type=float, default=5.0,
                    help="half-width in mm of the boundary band used for checkpoint selection")
+    p.add_argument("--swa",         action="store_true",
+                   help="average the weights of the last epochs instead of picking one. "
+                        "Boundary Dice still swings visibly from epoch to epoch after 200, "
+                        "so the best of 250 is partly whichever epoch flattered 18 "
+                        "validation cases; a weight average also tends to land somewhere "
+                        "flatter than any single iterate")
+    p.add_argument("--swa-start",   type=int,   default=0,
+                   help="epoch to start averaging from; 0 means 80%% of the budget")
+    p.add_argument("--swa-lr",      type=float, default=1e-4,
+                   help="constant rate during averaging, so the iterates keep moving")
     p.add_argument("--seed",        type=int,   default=None)
     p.add_argument("--cache-dir",   type=str,   default=os.path.join(PARENT, "cache"))
     p.add_argument("--splits-json", type=str,   default=os.path.join(PARENT, "splits.json"))
@@ -134,7 +145,16 @@ def main():
 
     model     = UNet3D(in_channels=1, base_channels=a.base_ch, out_activation="tanh").to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=a.lr)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=a.epochs)
+
+    # Cosine annealing until SWA starts, then a constant moderate rate. Letting cosine
+    # run to zero would make the last epochs' weights nearly identical, and averaging
+    # identical weights achieves nothing — SWA works because the iterates differ and
+    # their mean lands somewhere flatter than any of them.
+    swa_start = a.swa_start if a.swa_start > 0 else int(a.epochs * 0.8)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=swa_start if a.swa else a.epochs)
+    swa_model = AveragedModel(model) if a.swa else None
+    swa_sched = SWALR(optimizer, swa_lr=a.swa_lr, anneal_epochs=5) if a.swa else None
 
     checkpoint_dir  = os.path.join(run_dir, "checkpoints")
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -158,7 +178,12 @@ def main():
                 val_loss, val_mae, val_dice, val_bdice = val_epoch(
                     model, val_loader, loss_fn, device, band_mm=a.band_mm)
 
-            scheduler.step()
+            if a.swa and epoch >= swa_start:
+                swa_model.update_parameters(model)
+                swa_sched.step()
+            else:
+                scheduler.step()
+
             improved = val_bdice > best_boundary_dice
             if improved:
                 best_boundary_dice = val_bdice
@@ -173,8 +198,24 @@ def main():
             with open(log_path, "a") as f:
                 f.write(f"{epoch},{train_loss:.4f},{val_loss:.4f},{val_mae:.4f},{val_dice:.4f},{val_bdice:.4f}\n")
 
+    # Three candidates, so the choice between them is made on numbers rather than on
+    # an argument about which selection rule is sounder.
+    torch.save(model.state_dict(), os.path.join(checkpoint_dir, "phase1_last.pth"))
+
+    if a.swa:
+        # BatchNorm's running statistics are not weights and were never averaged, so
+        # they belong to no particular iterate. One pass over the training data with the
+        # averaged weights recomputes them.
+        update_bn(train_loader, swa_model, device=device)
+        torch.save(swa_model.module.state_dict(),
+                   os.path.join(checkpoint_dir, "phase1_swa.pth"))
+        swa_loss, swa_mae, swa_dice, swa_bdice = val_epoch(
+            swa_model.module, val_loader, loss_fn, device, band_mm=a.band_mm)
+        print(f"\nSWA (from epoch {swa_start}): val_mae={swa_mae:.4f} "
+              f"val_dice={swa_dice:.4f} val_boundary_dice={swa_bdice:.4f}")
+
     print(f"\nBest val boundary Dice : {best_boundary_dice:.4f}")
-    print(f"Checkpoint   : {checkpoint_path}")
+    print(f"Checkpoints  : {checkpoint_dir}")
     print(f"Log          : {log_path}")
 
 
