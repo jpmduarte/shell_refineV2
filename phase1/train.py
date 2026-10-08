@@ -20,8 +20,9 @@ PARENT = os.path.dirname(HERE)
 sys.path.insert(0, PARENT)
 
 from cache import case_ids  # noqa: E402
-from dataset import Phase1Dataset  # noqa: E402
-from loss import gradient_difference_loss, get_loss  # noqa: E402
+from dataset import CUBE_FOR_FACTOR, Phase1Dataset  # noqa: E402
+from loss import (get_loss, gradient_cosine_loss,  # noqa: E402
+                  gradient_difference_loss, surface_weighted_l1)
 from metrics import boundary_dice_from_sdf, dice_from_sdf, mae  # noqa: E402
 from model import UNet3D  # noqa: E402
 from profiler import Profiler, model_summary  # noqa: E402
@@ -36,15 +37,25 @@ def seed_worker(worker_id):
     info.dataset._rng = np.random.default_rng(info.seed % 2**32)
 
 
-def train_epoch(model, loader, loss_fn, optimizer, device, gd_coef: float) -> float:
+def train_epoch(model, loader, loss_fn, optimizer, device, gd_coef: float,
+                sw_coef: float = 0.0, sw_sigma: float = 1.5,
+                base_coef: float = 1.0, gc_coef: float = 0.0) -> float:
     model.train()
     total_loss = 0.0
     for x, y in loader:
         x, y = x.to(device), y.to(device)
         pred = model(x)
-        loss = loss_fn(pred, y)
+        # base_coef 0 drops the plain term entirely, which is how "surface-weighted
+        # alone" gets tested. It is worth knowing whether the far field needs
+        # supervising at all: the weight falls to 0.04 at 5mm, so on its own this
+        # barely constrains the field where the band is decided from.
+        loss = base_coef * loss_fn(pred, y) if base_coef > 0 else pred.sum() * 0.0
         if gd_coef > 0:
             loss = loss + gd_coef * gradient_difference_loss(pred, y)
+        if sw_coef > 0:
+            loss = loss + sw_coef * surface_weighted_l1(pred, y, sw_sigma)
+        if gc_coef > 0:
+            loss = loss + gc_coef * gradient_cosine_loss(pred, y)
 
         optimizer.zero_grad()
         loss.backward()
@@ -95,6 +106,20 @@ def main():
     p.add_argument("--loss",        type=str,   default="l1")
     p.add_argument("--gd-coef",     type=float, default=0.0,
                    help="0.0 (default) = off. Weight of gradient_difference_loss added on top of --loss")
+    p.add_argument("--gc-coef",     type=float, default=0.0,
+                   help="0.0 (default) = off. Weight of gradient_cosine_loss (surface "
+                        "normal direction match) added on top of --loss")
+    p.add_argument("--factor",      type=int,   default=8, choices=[2, 4, 8],
+                   help="cache downsampling the prior is predicted at: 8 is 3.2mm per "
+                        "voxel, 4 is 1.6mm")
+    p.add_argument("--sw-coef",     type=float, default=0.0,
+                   help="0.0 (default) = off. Weight of an L1 term concentrated near "
+                        "the zero crossing, added on top of --loss")
+    p.add_argument("--base-coef",   type=float, default=1.0,
+                   help="weight on the plain loss; 0 leaves only the weighted "
+                        "terms, which stops supervising the far field")
+    p.add_argument("--sw-sigma",    type=float, default=1.5,
+                   help="mm over which that weight decays away from the surface")
     p.add_argument("--band-mm",     type=float, default=5.0,
                    help="half-width in mm of the boundary band used for checkpoint selection")
     p.add_argument("--swa",         action="store_true",
@@ -124,7 +149,9 @@ def main():
 
     device  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     loss_fn = get_loss(a.loss)
-    print(f"Device: {device}  Loss: {a.loss}  gd_coef: {a.gd_coef}  Fold: {a.fold}  Run: {run_dir}")
+    print(f"Device: {device}  Fold: {a.fold}  Run: {run_dir}")
+    print(f"Loss: {a.loss}  gd={a.gd_coef}  gc={a.gc_coef}  sw={a.sw_coef}@{a.sw_sigma}mm  "
+          f"prior: x{a.factor} padded to {CUBE_FOR_FACTOR[a.factor]}^3")
 
     ids   = case_ids(a.cache_dir)
     folds = get_folds(ids, n_folds=a.n_folds, seed=42, splits_json=a.splits_json)
@@ -135,11 +162,13 @@ def main():
     worker_init = seed_worker if a.seed is not None else None
 
     train_loader = DataLoader(
-        Phase1Dataset(a.cache_dir, train_ids, augment=True, seed=a.seed),
+        Phase1Dataset(a.cache_dir, train_ids, augment=True, seed=a.seed,
+                      factor=a.factor),
         batch_size=a.batch_size, shuffle=True, num_workers=a.workers,
         pin_memory=True, generator=loader_gen, worker_init_fn=worker_init)
     val_loader = DataLoader(
-        Phase1Dataset(a.cache_dir, val_ids, augment=False, seed=a.seed),
+        Phase1Dataset(a.cache_dir, val_ids, augment=False, seed=a.seed,
+                      factor=a.factor),
         batch_size=a.batch_size, shuffle=False, num_workers=a.workers,
         pin_memory=True, generator=loader_gen, worker_init_fn=worker_init)
 
@@ -171,7 +200,9 @@ def main():
     with prof:
         for epoch in range(1, a.epochs + 1):
             with prof.span("train_epoch") as s:
-                train_loss = train_epoch(model, train_loader, loss_fn, optimizer, device, a.gd_coef)
+                train_loss = train_epoch(model, train_loader, loss_fn, optimizer, device,
+                                         a.gd_coef, a.sw_coef, a.sw_sigma,
+                                         a.base_coef, a.gc_coef)
                 s["items"] = len(train_loader.dataset)
 
             with prof.span("val_epoch"):

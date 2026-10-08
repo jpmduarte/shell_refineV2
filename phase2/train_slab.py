@@ -27,6 +27,7 @@ sys.path.insert(0, HERE)
 
 from dataset import collate_patches  # noqa: E402
 from model import UNet3D  # noqa: E402
+from model_deep import DeepUNet3D  # noqa: E402
 from profiler import Profiler, model_summary  # noqa: E402
 from slab import LONG, SlabDataset, THIN  # noqa: E402
 from splits import fold_split, get_folds  # noqa: E402
@@ -52,6 +53,9 @@ def main():
     p.add_argument("--lr",               type=float, default=3e-4)
     p.add_argument("--workers",          type=int,   default=2)
     p.add_argument("--base-ch",          type=int,   default=16)
+    p.add_argument("--deep", action="store_true",
+                   help="four pooling levels instead of three, doubling the receptive "
+                        "field at the bottleneck (1.4M -> 5.6M params)")
     p.add_argument("--no-band-masked-loss", action="store_true")
     p.add_argument("--seed",             type=int,   default=None)
     p.add_argument("--splits-json",      type=str,   default=os.path.join(REPO_ROOT, "splits.json"))
@@ -100,7 +104,8 @@ def main():
         pin_memory=True, collate_fn=collate_patches,
         generator=loader_gen, worker_init_fn=worker_init)
 
-    model     = UNet3D(in_channels=2, base_channels=a.base_ch, out_activation="sigmoid").to(device)
+    model     = (DeepUNet3D if a.deep else UNet3D)(
+        in_channels=2, base_channels=a.base_ch, out_activation="sigmoid").to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=a.lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=a.epochs)
     print(f"Model: {model_summary(model)}")

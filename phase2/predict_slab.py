@@ -27,9 +27,31 @@ sys.path.insert(0, REPO_ROOT)
 sys.path.insert(0, HERE)
 
 from model import UNet3D  # noqa: E402
+from model_deep import DeepUNet3D  # noqa: E402
 from profiler import Profiler, model_summary  # noqa: E402
 from slab import local_normal_axis, LONG, pad_to_shape, THIN  # noqa: E402
 from splits import fold_split, get_folds  # noqa: E402
+
+
+def tile_weight(shape: tuple, sigma_frac: float = 0.125) -> np.ndarray:
+    """A Gaussian bump over a tile, peaking at its centre.
+
+    Uniform averaging trusts a tile's edge as much as its middle, and it should not: a
+    voxel at the border was decided with context truncated on one side, while one at the
+    centre had the full receptive field. Weighting by distance from the centre lets each
+    voxel be decided mostly by the tile that saw the most around it, and smooths the
+    discontinuities where one tile's coverage ends and another's begins.
+
+    sigma_frac is in units of the tile's own extent, so one figure covers both the long
+    and thin axes of a slab. At 1/8 a corner weighs about 2% of the centre, without
+    reaching zero — a voxel covered only by tile corners must still be decided.
+    """
+    axes = []
+    for n in shape:
+        x = (np.arange(n, dtype=np.float32) - (n - 1) / 2.0) / max(n, 1)
+        axes.append(np.exp(-0.5 * (x / sigma_frac) ** 2))
+    w = axes[0][:, None, None] * axes[1][None, :, None] * axes[2][None, None, :]
+    return np.maximum(w, 1e-3).astype(np.float32)
 
 
 def axis_origins(dim: int, extent: int, stride: int) -> list[int]:
@@ -42,7 +64,7 @@ def axis_origins(dim: int, extent: int, stride: int) -> list[int]:
 
 @torch.no_grad()
 def predict_case(model, crop_path: str, device, long: int, thin: int,
-                 overlap: float, tile_batch: int):
+                 overlap: float, tile_batch: int, sigma_frac: float = 0.0):
     # Only what inference reads: mask and sdf_true are for evaluation, and skipping
     # them saves about 50ms a case.
     with np.load(crop_path) as _z:
@@ -91,8 +113,11 @@ def predict_case(model, crop_path: str, device, long: int, thin: int,
         ])
         preds = model(torch.from_numpy(batch).to(device)).squeeze(1).cpu().numpy()
         for (sl, ax), pred in zip(chunk, preds):
-            accum[sl] += np.moveaxis(pred, -1, ax)
-            count[sl] += 1.0
+            contrib = np.moveaxis(pred, -1, ax)
+            w = (tile_weight(contrib.shape, sigma_frac) if sigma_frac > 0
+                 else np.float32(1.0))
+            accum[sl] += contrib * w
+            count[sl] += w
 
     refined = coarse_p.copy()
     touched = band & (count > 0)
@@ -118,12 +143,18 @@ def main():
     p.add_argument("--overlap",     type=float, default=0.25,
                    help="fraction of each extent shared between neighbouring tiles")
     p.add_argument("--tile-batch",  type=int, default=4)
+    p.add_argument("--blend-sigma", type=float, default=0.0,
+                   help="Gaussian tile weighting, as a fraction of tile "
+                        "extent. 0 keeps uniform averaging; 0.125 is a "
+                        "sensible start")
     p.add_argument("--base-ch",     type=int, default=16)
+    p.add_argument("--deep", action="store_true", help="must match training")
     p.add_argument("--splits-json", type=str, default=os.path.join(REPO_ROOT, "splits.json"))
     a = p.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = UNet3D(in_channels=2, base_channels=a.base_ch, out_activation="sigmoid").to(device)
+    model = (DeepUNet3D if a.deep else UNet3D)(
+        in_channels=2, base_channels=a.base_ch, out_activation="sigmoid").to(device)
     model.load_state_dict(torch.load(a.checkpoint, map_location=device))
     model.eval()
 
@@ -148,7 +179,7 @@ def main():
             with prof.span("predict_case") as s:
                 refined, coarse, band, mask, spacing, n_tiles, cov = predict_case(
                     model, os.path.join(a.crops_dir, f"{cid}.npz"),
-                    device, a.long, a.thin, a.overlap, a.tile_batch)
+                    device, a.long, a.thin, a.overlap, a.tile_batch, a.blend_sigma)
                 s["items"] = n_tiles
             coverages.append(cov)
             np.savez_compressed(os.path.join(a.out_dir, f"{cid}.npz"),

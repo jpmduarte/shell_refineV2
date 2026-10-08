@@ -19,6 +19,11 @@ from make_sdf import load as load_sdf  # noqa: E402
 
 CUBE = 48
 
+# Cube side per downsampling factor: the smallest multiple of 16 that fits every case,
+# since three pooling levels must never meet an odd dimension. Largest volumes are
+# 45x46x31 at x8 and 88x92x61 at x4.
+CUBE_FOR_FACTOR = {8: 48, 4: 96, 2: 192}
+
 
 def pad_to_cube(vol: np.ndarray, cube: int, cval: float) -> np.ndarray:
     pads = [(0, cube - s) for s in vol.shape]
@@ -51,11 +56,15 @@ class Phase1Dataset(Dataset):
     """cache_dir/x8/<cid>.npz + cache_dir/sdf/x8/<cid>.npz -> (image, sdf) at a fixed cube."""
 
     def __init__(self, cache_dir: str, case_ids: list[str], augment: bool = False,
-                 cube: int = CUBE, seed: int = None):
+                 cube: int = None, seed: int = None, factor: int = 8):
         self.cache_dir = cache_dir
         self.case_ids  = case_ids
         self.augment   = augment
-        self.cube      = cube
+        # The factor is the prior's resolution: x8 is 3.2mm per voxel, x4 is 1.6mm.
+        # Phase 2 refines a band around whatever surface this produces, so a coarse
+        # factor quantises the boundary before the refiner ever sees it.
+        self.factor    = factor
+        self.cube      = cube or CUBE_FOR_FACTOR[factor]
         # None (default): unseeded. With num_workers>0, seed_worker (train.py) reseeds
         # each forked copy independently — see train.py for why that step is needed.
         self._rng = np.random.default_rng(seed)
@@ -65,8 +74,8 @@ class Phase1Dataset(Dataset):
 
     def __getitem__(self, idx: int):
         cid = self.case_ids[idx]
-        img, _ = load_image(self.cache_dir, cid, 8)
-        sdf, _ = load_sdf(self.cache_dir, cid, 8)
+        img, _ = load_image(self.cache_dir, cid, self.factor)
+        sdf, _ = load_sdf(self.cache_dir, cid, self.factor)
         img, sdf = img.astype(np.float32), sdf.astype(np.float32)
 
         if self.augment:

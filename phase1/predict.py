@@ -24,7 +24,7 @@ PARENT = os.path.dirname(HERE)
 sys.path.insert(0, PARENT)
 
 from cache import case_ids, load as load_image  # noqa: E402
-from dataset import pad_to_cube, CUBE  # noqa: E402
+from dataset import CUBE_FOR_FACTOR, pad_to_cube  # noqa: E402
 from geometry import apply_resample, resample_grid  # noqa: E402
 from model import UNet3D  # noqa: E402
 from profiler import Profiler, model_summary  # noqa: E402
@@ -49,7 +49,8 @@ def native_geometry(cache_dir: str, cid: str):
     return tuple(shape), affine
 
 @torch.no_grad()
-def predict_one(model, cache_dir: str, cid: str, device: torch.device, cube: int = CUBE):
+def predict_one(model, cache_dir: str, cid: str, device: torch.device,
+                cube: int = None, factor: int = 8):
     """Predict the field and carry it up to native resolution.
 
     The upsample dominated this: SpatialResample builds its grid from the affines in
@@ -58,7 +59,8 @@ def predict_one(model, cache_dir: str, cid: str, device: torch.device, cube: int
     the sampling done on the GPU in float32 — 149x faster, and agreeing with
     SpatialResample to 1e-5, which is float precision rather than different geometry.
     """
-    img8, affine8 = load_image(cache_dir, cid, 8)
+    cube = cube or CUBE_FOR_FACTOR[factor]
+    img8, affine8 = load_image(cache_dir, cid, factor)
     # Only the native shape and affine are needed, not 78 MB of voxels: reading the
     # header alone saves 65ms per case.
     native_shape, affine1 = native_geometry(cache_dir, cid)
@@ -87,6 +89,8 @@ def main():
     p.add_argument("--split",       type=str, default="val", choices=["train", "val"])
     p.add_argument("--n-folds",     type=int, default=5)
     p.add_argument("--splits-json", type=str, default=os.path.join(PARENT, "splits.json"))
+    p.add_argument("--factor",      type=int, default=8, choices=[2, 4, 8],
+                   help="must match training")
     p.add_argument("--base-ch",     type=int, default=16)
     p.add_argument("--cache-dir",   type=str, default=os.path.join(PARENT, "cache"))
     p.add_argument("--out-dir",     type=str, required=True)
@@ -118,7 +122,8 @@ def main():
     with prof:
         for i, cid in enumerate(cids, start=1):
             with prof.span("predict_case") as s:
-                sdf, affine = predict_one(model, a.cache_dir, cid, device)
+                sdf, affine = predict_one(model, a.cache_dir, cid, device,
+                                          factor=a.factor)
                 s["items"] = 1
             np.savez(os.path.join(a.out_dir, f"{cid}.npz"), sdf=sdf, affine=affine)
             print(f"[{i}/{len(cids)}] {cid[:44]:<44} native={sdf.shape}", flush=True)

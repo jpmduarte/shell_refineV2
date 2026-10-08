@@ -44,6 +44,17 @@ an OOM, a missing file, a kill — will usually happen again, and relaunching si
 hides both the interruption and its cause. Putting it back is a decision to make after
 looking at the log.
 
+Telling an interrupted job from a finished one needs evidence the job leaves behind,
+because a dead PID says nothing about how it ended. Each job's outcome is recorded in
+queue/.outcomes/ as it finishes, outside running/ so it survives the move. Without that
+record, thirty-one completed runs were filed as failures simply because no runner was
+watching when they ended.
+
+Changing how any of that is written means bumping VERSION. A runner will adopt jobs
+started by an older one, but warns when it does: those jobs write no outcome record, so
+if they end unwatched they will look like crashes. scripts/outcome_watcher.py fills
+that gap without restarting the runner and discarding work in progress.
+
 Both memories gate a launch. VRAM is the obvious one; system RAM is the one that bit —
 four slab folds fit easily in 12 GB of VRAM and still took 31 of 32 GB of RAM, because
 every dataloader worker decompresses its own native-resolution crop. A job declares
@@ -60,6 +71,7 @@ folds together use 4.3 GB of 12.2 GB.
 
 import argparse
 import atexit
+import glob
 import json
 import os
 import re
@@ -74,6 +86,13 @@ PENDING, RUNNING = os.path.join(QUEUE, "pending"), os.path.join(QUEUE, "running"
 DONE, FAILED     = os.path.join(QUEUE, "done"),    os.path.join(QUEUE, "failed")
 LOGS             = os.path.join(QUEUE, "logs")
 LOCK             = os.path.join(QUEUE, ".runner.lock")
+OUTCOMES         = os.path.join(QUEUE, ".outcomes")
+
+# Bumped when the runner changes how it records state. A job started by an
+# older runner may leave state this one cannot interpret: version 1 wrote no
+# outcome record, so its finished jobs were indistinguishable from crashed
+# ones and thirty-one completed runs were filed as failures.
+VERSION = 2
 
 DEFAULT_VRAM_MB = 3000
 # A phase 2 training with two dataloader workers measured about 7 GB of RAM: the main
@@ -120,9 +139,10 @@ def host_free_mb() -> int:
 
 
 def parse_header(text: str) -> dict:
-    head = {"vram": DEFAULT_VRAM_MB, "ram": DEFAULT_RAM_MB, "desc": "", "probe": ""}
+    head = {"vram": DEFAULT_VRAM_MB, "ram": DEFAULT_RAM_MB, "desc": "", "probe": "",
+            "needs": ""}
     for line in text.splitlines():
-        m = re.match(r"^\s*#\s*(vram|ram|desc|probe)\s*:\s*(.+?)\s*$", line, re.I)
+        m = re.match(r"^\s*#\s*(vram|ram|desc|probe|needs)\s*:\s*(.+?)\s*$", line, re.I)
         if m:
             key, value = m.group(1).lower(), m.group(2)
             head[key] = int(value) if key in ("vram", "ram") else value
@@ -160,6 +180,27 @@ def measure(probe: str, declared: int, free: int) -> int:
     return peak
 
 
+def needs_met(spec: str) -> tuple[bool, str]:
+    """Is a job's `# needs:` satisfied?
+
+    The spec is a glob, optionally followed by `>= n` for how many files must match:
+
+        # needs: phase1/runs/fold*/preds_val/*.npz >= 90
+
+    Counting files rather than waiting on a marker keeps it honest about partial work —
+    a crop directory with sixty of ninety cases is not ready, and a job that started
+    anyway would train on whatever happened to exist.
+    """
+    if not spec:
+        return True, ""
+
+    m = re.match(r"^(.*?)(?:\s*>=\s*(\d+))?$", spec.strip())
+    pattern, want = m.group(1).strip(), int(m.group(2) or 1)
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    have = len(glob.glob(os.path.join(root, pattern)))
+    return have >= want, f"{have}/{want}"
+
+
 class Job:
     def __init__(self, name: str):
         self.name = name
@@ -172,21 +213,45 @@ class Job:
         self.adopted = False
 
 
+# A job script announces its own failures before exiting, and a crash leaves a
+# traceback. Both are visible in the log even when the exit status is not.
+FAILURE_MARKERS = ("Traceback (most recent call last)", "FAILED", "WRONG COUNT")
+
+
+def log_says_failed(log_path: str | None) -> bool:
+    """Whether an adopted job's log shows it died, since its exit status is lost."""
+    if not log_path or not os.path.exists(log_path):
+        return False
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as f:
+            tail = f.read()[-8000:]
+    except OSError:
+        return False
+    return any(m in tail for m in FAILURE_MARKERS)
+
+
 class Adopted:
     """A job from a previous runner that is still alive.
 
     Polled by PID rather than waited on: it is not this process's child, so there is no
     exit status to collect. That also means its VRAM has to keep counting against the
     budget, or this runner would launch on top of memory that is already spoken for.
+
+    Its disposition therefore comes from the log rather than from an exit code. It used
+    to be scored 0 whenever the PID disappeared, which filed five folds that had all
+    crashed at epoch 30 under done/, where nothing looked at them again — the `needs:`
+    gate held their dependents back, so the queue sat idle for an hour saying it was
+    waiting rather than saying they had died.
     """
 
-    def __init__(self, pid: int):
+    def __init__(self, pid: int, log_path: str | None = None):
         self.pid = pid
+        self.log_path = log_path
         self.returncode = None
 
     def poll(self):
         if self.returncode is None and not pid_alive(self.pid):
-            self.returncode = 0
+            self.returncode = 1 if log_says_failed(self.log_path) else 0
         return self.returncode
 
 
@@ -198,6 +263,31 @@ def pid_alive(pid: int) -> bool:
         return str(pid) in out
     except Exception:
         return False
+
+
+def outcome_path(name: str) -> str:
+    return os.path.join(OUTCOMES, name + ".json")
+
+
+def mark_outcome(name: str, status: str, code: int) -> None:
+    """Record how a job ended, outside running/ so it survives the move.
+
+    A runner that outlives its jobs does not need this. One that is killed while jobs
+    are still going does: the next runner finds them in running/ with dead PIDs and
+    cannot otherwise tell a job that crashed from one that finished normally in the
+    gap. Eleven completed jobs were filed as failures that way.
+    """
+    os.makedirs(OUTCOMES, exist_ok=True)
+    with open(outcome_path(name), "w") as f:
+        json.dump({"status": status, "exit": code, "at": time.time()}, f)
+
+
+def read_outcome(name: str) -> dict | None:
+    try:
+        with open(outcome_path(name)) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError, FileNotFoundError):
+        return None
 
 
 def acquire_lock(force: bool = False) -> None:
@@ -278,7 +368,7 @@ def launch(name: str, need: int) -> Job:
     # duplicates fight over it.
     with open(os.path.join(RUNNING, name + ".state"), "w") as f:
         json.dump({"pid": job.proc.pid, "vram": job.vram, "desc": job.desc,
-                   "log": log_path, "started": job.started}, f)
+                   "log": log_path, "started": job.started, "runner": VERSION}, f)
 
     print(f"[{datetime.now():%H:%M:%S}] start  {name}  ({job.vram} MiB)"
           f"{'  — ' + job.desc if job.desc else ''}", flush=True)
@@ -301,11 +391,13 @@ def reap(running: list[Job]) -> list[Job]:
         state_path = os.path.join(RUNNING, job.name + ".state")
         if os.path.exists(state_path):
             os.remove(state_path)
+        mark_outcome(job.name, "done" if ok else "failed", code)
         mins = (time.time() - job.started) / 60
-        # An adopted job's exit status is not visible: it is not this process's child,
-        # so only its disappearance can be observed, not how it ended.
-        status = "ended" if job.adopted else ("done " if ok else "FAIL ")
-        detail = f"{mins:.0f} min" if job.adopted else f"exit {code}, {mins:.0f} min"
+        # An adopted job has no exit status to collect: it is not this process's child,
+        # so its verdict was read out of its log instead (see Adopted.poll).
+        status = "done " if ok else "FAIL "
+        detail = (f"{mins:.0f} min, from log" if job.adopted
+                  else f"exit {code}, {mins:.0f} min")
         print(f"[{datetime.now():%H:%M:%S}] {status} {job.name}  ({detail})", flush=True)
     return still
 
@@ -327,7 +419,7 @@ def main():
                         "it is dead and the lock is stale")
     a = p.parse_args()
 
-    for d in (PENDING, RUNNING, DONE, FAILED, LOGS):
+    for d in (PENDING, RUNNING, DONE, FAILED, LOGS, OUTCOMES):
         os.makedirs(d, exist_ok=True)
     acquire_lock(a.force)
 
@@ -354,7 +446,7 @@ def main():
         pid = state.get("pid")
         if pid and pid_alive(pid):
             job = Job(name)
-            job.proc = Adopted(pid)
+            job.proc = Adopted(pid, state.get("log"))
             job.vram = state.get("vram", DEFAULT_VRAM_MB)
             job.desc = state.get("desc", "")
             job.log_path = state.get("log")
@@ -364,15 +456,29 @@ def main():
             mins = (time.time() - job.started) / 60
             print(f"adopted running job: {name} (pid {pid}, {job.vram} MiB, "
                   f"{mins:.0f} min in)")
+            if state.get("runner", 1) < VERSION:
+                print(f"  NOTE: started by runner v{state.get('runner', 1)}, which does "
+                      f"not write outcome records.\n"
+                      f"  If this process ends while no runner is watching, its result "
+                      f"will look like a crash.\n"
+                      f"  scripts/outcome_watcher.py covers that gap.")
             if job.log_path:
                 print(f"                     log: {job.log_path}")
         else:
-            # To failed/, not back to pending/. A job whose process is gone was either
-            # killed or died, and relaunching it silently hides both: the fact that it
-            # was interrupted, and whatever killed it — an OOM or a missing file will
-            # simply happen again. Requeueing is a decision for whoever looks at it.
-            print(f"job interrupted, moved to failed/: {name}")
-            shutil.move(os.path.join(RUNNING, name), os.path.join(FAILED, name))
+            # The PID is gone, but that alone does not say whether the job finished.
+            # A runner killed while its jobs were still going leaves them looking
+            # identical to jobs that crashed, so check what the job itself recorded.
+            outcome = read_outcome(name)
+            if outcome and outcome.get("status") == "done":
+                print(f"completed while no runner was watching: {name}")
+                dest = DONE
+            else:
+                # Genuinely interrupted. To failed/ rather than back to pending/:
+                # whatever killed it usually happens again, and relaunching silently
+                # hides both the interruption and its cause.
+                print(f"job interrupted, moved to failed/: {name}")
+                dest = FAILED
+            shutil.move(os.path.join(RUNNING, name), os.path.join(dest, name))
             if os.path.exists(state_path):
                 os.remove(state_path)
 
@@ -395,10 +501,34 @@ def main():
 
         settling = time.time() - last_launch < SETTLE_SECONDS
         under_cap = (not a.max_jobs) or len(running) < a.max_jobs
-        if pending and under_cap and not settling:
-            name = pending[0]
-            with open(os.path.join(PENDING, name), encoding="utf-8-sig") as f:
+
+        # Skip past jobs whose inputs do not exist yet and take the first that is
+        # ready, rather than stopping at the head of the queue. Order still decides
+        # among jobs that can all run.
+        ready, blocked = None, []
+        for candidate in pending:
+            with open(os.path.join(PENDING, candidate), encoding="utf-8-sig") as f:
                 head = parse_header(f.read())
+            ok, progress = needs_met(head["needs"])
+            if ok:
+                ready = (candidate, head)
+                break
+            blocked.append((candidate, head["needs"], progress))
+
+        # One line for the whole scan, not one per blocked job: with twenty-odd jobs
+        # waiting on the same dependency, per-job lines repeat every poll and bury
+        # everything else. Reported only when the picture changes.
+        if ready is None and blocked:
+            state = ("waiting", len(blocked), blocked[0][2])
+            if state != last_hold:
+                first, need, progress = blocked[0]
+                more = f" (+{len(blocked) - 1} more)" if len(blocked) > 1 else ""
+                print(f"[{datetime.now():%H:%M:%S}] wait   {first} needs {need} "
+                      f"({progress}){more}", flush=True)
+                last_hold = state
+
+        if ready and under_cap and not settling:
+            name, head = ready
 
             total, used = gpu_total_used()
             free = (total - used) if total else 10 ** 9
