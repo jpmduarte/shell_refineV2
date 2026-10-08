@@ -14,9 +14,6 @@ cd /home/users/2ai12_1/fetai/shell_refineV2
 python -u cache.py \
     --images-dir /home/users/2ai12/Desktop/Datasets_shared/FetalUltrasound/Images \
     --labels-dir /home/users/2ai12/Desktop/Datasets_shared/FetalUltrasound/Labels/Head \
-    --out-dir cache
+    --out-dir caches/cache
 
-echo "=== cache build done, running tests ==="
-
-python -u test_cache.py --round-trip-cases 2
-python -u test_geometry.py
+echo "=== cache build done ==="

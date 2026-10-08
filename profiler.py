@@ -1,14 +1,15 @@
-"""Minimal per-span profiler: wall time, peak VRAM, RAM, CPU. No background sampling
-thread, no NVML — reads torch's own counters and psutil at span boundaries only.
-
-    prof = Profiler("phase1_train")
-    with prof:
-        for epoch in range(epochs):
-            with prof.span("train_epoch") as s:
-                ...
-                s["items"] = n_cases
-    # prints a summary table; prof.summary() has the same data as a dict
-"""
+# A minimal profiler for training and prediction: wall time, peak GPU memory, RAM and CPU
+# per named span, printed as a table at the end.
+#
+#     prof = Profiler("train")
+#     with prof:
+#         for epoch in range(epochs):
+#             with prof.span("train_epoch") as s:
+#                 ...
+#                 s["items"] = n_cases      # optional: gives a throughput
+#
+# It reads PyTorch's own memory counters and psutil at the start and end of each span;
+# nothing runs in the background.
 
 import time
 from collections import defaultdict
@@ -16,6 +17,7 @@ from contextlib import contextmanager
 
 import torch
 
+# psutil gives RAM and CPU; without it those columns are simply left out.
 try:
     import psutil
 except ImportError:
@@ -24,10 +26,12 @@ except ImportError:
 MB = 1024 ** 2
 
 
+# True once this process has actually used the GPU.
 def _cuda_active() -> bool:
     return torch.cuda.is_available() and torch.cuda.is_initialized()
 
 
+# Number of parameters, and their size in MB as float32.
 def model_summary(model: torch.nn.Module) -> dict:
     params = sum(p.numel() for p in model.parameters())
     return {"params": params, "params_mb": round(params * 4 / MB, 2)}
@@ -37,11 +41,12 @@ class Profiler:
 
     def __init__(self, stage: str):
         self.stage  = stage
-        self._spans = defaultdict(list)
+        self._spans = defaultdict(list)   # span name -> one record per run of that span
         self._t0    = None
         self._proc  = psutil.Process() if psutil else None
         if self._proc:
-            self._proc.cpu_percent()  # prime; first call always returns 0.0
+            # psutil's first CPU reading is always 0; take it now so later ones are real.
+            self._proc.cpu_percent()
 
     def __enter__(self):
         self._t0 = time.perf_counter()
@@ -53,9 +58,10 @@ class Profiler:
         self.print_summary()
         return False
 
+    # Time one block. Yields a dict the caller can add fields to (e.g. s["items"] = n).
     @contextmanager
     def span(self, name: str, **meta):
-        """Time a block; yields a dict a caller can add fields to (e.g. s["items"] = n)."""
+        # GPU work runs asynchronously: wait for it, so the timing covers this block only.
         if _cuda_active():
             torch.cuda.synchronize()
             torch.cuda.reset_peak_memory_stats()
@@ -65,17 +71,17 @@ class Profiler:
         finally:
             if _cuda_active():
                 torch.cuda.synchronize()
-            duration = time.perf_counter() - t0
-            record = {"duration_s": duration, **meta}
+            record = {"duration_s": time.perf_counter() - t0, **meta}
 
             if _cuda_active():
                 record["peak_vram_mb"] = torch.cuda.max_memory_allocated() / MB
             if self._proc:
                 record["ram_mb"]  = self._proc.memory_info().rss / MB
-                record["cpu_pct"] = self._proc.cpu_percent()
+                record["cpu_pct"] = self._proc.cpu_percent()   # since the previous reading
 
             self._spans[name].append(record)
 
+    # Per span: count, total and mean time, peak VRAM and RAM, mean CPU, throughput.
     def summary(self) -> dict:
         spans = {}
         for name, records in self._spans.items():

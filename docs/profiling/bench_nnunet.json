@@ -1,0 +1,22 @@
+{
+ "nnU-Net": {
+  "ms_median": 1347.636800026521,
+  "ms_mean": 1420.3510000241092,
+  "gpu_peak_allocated_mb": 1424.85546875,
+  "gpu_peak_reserved_mb": 1822.0,
+  "ram_peak_mb": 1958.47265625,
+  "cpu_s_per_case": 0.7092013888888888,
+  "parameters": 30785994,
+  "dice_mean": 0.948076567244357
+ },
+ "nnU-Net + TTA": {
+  "ms_median": 8902.929799980484,
+  "ms_mean": 9446.54891110905,
+  "gpu_peak_allocated_mb": 1442.79296875,
+  "gpu_peak_reserved_mb": 1822.0,
+  "ram_peak_mb": 2013.44140625,
+  "cpu_s_per_case": 2.1909722222222223,
+  "parameters": 30785994,
+  "dice_mean": 0.9481213912427846
+ }
+}

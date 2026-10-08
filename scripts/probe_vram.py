@@ -1,33 +1,28 @@
-"""Measure what a phase 2 configuration actually costs in VRAM.
-
-The queue schedules on this rather than on a number somebody guessed in a job header.
-One forward and one backward at the real shape, peak reserved reported — reserved, not
-allocated, because the caching allocator is what actually holds memory away from other
-processes.
-
-    python scripts/probe_vram.py --shape 8 64 64 64      # cube 64^3 x8
-    python scripts/probe_vram.py --shape 4 128 128 32    # slab 128x128x32 x4
-
-Prints one line the caller parses:  PEAK_MB <n>
-"""
+# Measures the GPU memory a training step really needs, for the job queue to schedule on.
+#
+#     python scripts/probe_vram.py                       # batch 4 at 96^3, the training shape
+#     python scripts/probe_vram.py --shape 8 96 96 96
+#
+# Runs two forward and backward steps at the given shape and prints one line the queue
+# parses:  PEAK_MB <n>
+# It reports memory reserved, not allocated: the reserve is what PyTorch actually holds
+# away from other processes.
 
 import argparse
 import os
 import sys
 
 import torch
+import torch.nn.functional as F
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from model import UNet3D  # noqa: E402
 
 
 def main():
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--shape", type=int, nargs=4, required=True,
-                   metavar=("N", "D", "H", "W"), help="batch and spatial extent")
-    p.add_argument("--in-channels", type=int, default=2)
-    p.add_argument("--base-ch", type=int, default=16)
+    p = argparse.ArgumentParser(description="Measure a training step's peak GPU memory.")
+    p.add_argument("--shape", type=int, nargs=4, default=[4, 96, 96, 96],
+                   metavar=("N", "D", "H", "W"), help="batch size and spatial size")
     a = p.parse_args()
 
     if not torch.cuda.is_available():
@@ -38,17 +33,17 @@ def main():
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
 
-    model = UNet3D(in_channels=a.in_channels, base_channels=a.base_ch,
-                   out_activation="sigmoid").cuda()
+    model = UNet3D().cuda()
     opt = torch.optim.Adam(model.parameters(), lr=1e-4)
 
-    x = torch.randn(n, a.in_channels, d, h, w, device="cuda")
-    y = torch.rand(n, 1, d, h, w, device="cuda")
+    # Random input and a random target in [-1, 1], like an SDF.
+    x = torch.randn(n, 1, d, h, w, device="cuda")
+    y = torch.rand(n, 1, d, h, w, device="cuda") * 2 - 1
 
-    # Two steps, not one: Adam allocates its moment buffers on the first step, so a
-    # single iteration understates the steady-state peak.
+    # Two steps, not one: Adam allocates its state on the first step, so one step
+    # understates the steady-state peak.
     for _ in range(2):
-        loss = torch.nn.functional.binary_cross_entropy(model(x), y)
+        loss = F.l1_loss(model(x), y)
         opt.zero_grad()
         loss.backward()
         opt.step()

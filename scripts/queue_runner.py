@@ -185,7 +185,7 @@ def needs_met(spec: str) -> tuple[bool, str]:
 
     The spec is a glob, optionally followed by `>= n` for how many files must match:
 
-        # needs: phase1/runs/fold*/preds_val/*.npz >= 90
+        # needs: size_normalization_approach/runs/fold*/preds_val/*.npz >= 90
 
     Counting files rather than waiting on a marker keeps it honest about partial work —
     a crop directory with sixty of ninety cases is not ready, and a job that started

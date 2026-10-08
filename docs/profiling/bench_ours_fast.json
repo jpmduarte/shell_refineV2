@@ -1,0 +1,56 @@
+{
+ "one model": {
+  "ms_median": 34.62015022523701,
+  "ms_mean": 35.49749442997078,
+  "stages_ms_median": {
+   "z-score": 4.4324001064524055,
+   "pass 1 (x4)": 12.29344995226711,
+   "normalise": 0.8229000959545374,
+   "pass 2": 11.48164994083345,
+   "to native": 5.422199959866703
+  },
+  "gpu_peak_allocated_mb": 702.49365234375,
+  "gpu_peak_reserved_mb": 1702.0,
+  "ram_peak_mb": 1463.140625,
+  "cpu_s_per_case": 0.06597222222222222,
+  "networks_run": 2,
+  "parameters": 2802530,
+  "dice_mean": 0.94376297460662
+ },
+ "one model + TTA": {
+  "ms_median": 115.30904995743185,
+  "ms_mean": 115.207688895882,
+  "stages_ms_median": {
+   "z-score": 4.517149995081127,
+   "pass 1 (x4)": 12.264549965038896,
+   "normalise": 0.8028498850762844,
+   "pass 2": 90.76614992227405,
+   "to native": 5.52929996047169
+  },
+  "gpu_peak_allocated_mb": 702.49365234375,
+  "gpu_peak_reserved_mb": 1708.0,
+  "ram_peak_mb": 1523.18359375,
+  "cpu_s_per_case": 0.1440972222222222,
+  "networks_run": 9,
+  "parameters": 2802530,
+  "dice_mean": 0.9454208413759867
+ },
+ "ensemble of 3 + TTA": {
+  "ms_median": 308.51389991585165,
+  "ms_mean": 308.94472217187285,
+  "stages_ms_median": {
+   "z-score": 4.96415002271533,
+   "pass 1 (x4)": 12.863049982115626,
+   "normalise": 1.0693499352782965,
+   "pass 2": 281.83265007101,
+   "to native": 5.684150033630431
+  },
+  "gpu_peak_allocated_mb": 702.49365234375,
+  "gpu_peak_reserved_mb": 1710.0,
+  "ram_peak_mb": 1523.25390625,
+  "cpu_s_per_case": 0.22395833333333334,
+  "networks_run": 25,
+  "parameters": 5605060,
+  "dice_mean": 0.945993208222919
+ }
+}

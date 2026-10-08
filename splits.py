@@ -1,19 +1,15 @@
-"""5-fold case splits, grouped by patient, cached so every run and every phase agrees.
-
-    splits.json: {"folds": [[case_id, ...] x5], "grouped_by_patient": true}
-
-Fold k's val set is folds[k]; its train set is every case in the other four.
-
-Grouping matters here: 90 volumes come from 82 patients, so six patients contributed
-more than one scan. Two scans of the same fetus taken in one session are far more alike
-than two different fetuses, and splitting them across a fold boundary means testing on
-something the model has effectively already seen. Shuffling case ids put five of those
-six patients on both sides, which was worth +0.0011 Dice — under the seed noise, but
-the sort of thing a reader is entitled to see ruled out rather than argued about.
-
-Folds come out slightly uneven as a result, because patients rather than volumes are
-what gets dealt out. That is the correct trade.
-"""
+# The 5-fold cross-validation split, grouped by patient and saved to splits.json so that
+# every run uses the same folds.
+#
+#     splits.json: {"folds": [[case_id, ...] x 5], "grouped_by_patient": true}
+#
+# Fold k validates on folds[k] and trains on the other four.
+#
+# Why group by patient: the 90 volumes come from 82 patients, so some fetuses were scanned
+# more than once. Two scans of the same fetus from one session are far more alike than two
+# different fetuses; with one in training and the other in validation, the model is tested
+# on something it has effectively already seen. The folds come out slightly uneven as a
+# result, because whole patients are dealt out rather than single volumes.
 
 import json
 import os
@@ -25,27 +21,20 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SPLITS_JSON = os.path.join(HERE, "splits.json")
 
 
+# The patient a case belongs to.
+# Most ids look like "<patient>_I<series>" (21_I0000006, 21_I0000008: same patient).
+# The rest are DICOM UIDs with no patient field, so each counts as its own patient:
+# merging cases that may be unrelated would be the worse mistake.
 def patient_of(case_id: str) -> str:
-    """The patient a case belongs to.
-
-    Two naming schemes are present. Most ids are '<patient>_I<series>', and the prefix
-    repeats across scans of one patient: 21_I0000006, 21_I0000008, 21_I0000028. The rest
-    are DICOM UIDs with no visible patient field, so each is treated as its own patient.
-    That is the conservative reading — assuming otherwise would merge cases that may be
-    unrelated, which is a worse error than leaving a group unmerged.
-    """
     m = re.match(r"^(\d+)_I\d+$", case_id)
     return f"P{m.group(1)}" if m else case_id
 
 
+# Deal whole patients into folds, largest patient first, each into whichever fold is
+# currently smallest. That keeps the fold sizes close without retrying; the shuffle
+# beforehand stops the result depending on the id order.
 def make_folds(case_ids: list[str], n_folds: int = 5, seed: int = 42) -> list[list[str]]:
-    """Deal patients into folds, largest group first.
-
-    Greedy rather than random: with a handful of three-volume patients, a random
-    assignment can leave one fold noticeably larger. Placing the biggest groups first
-    into whichever fold is currently smallest keeps the sizes close without needing to
-    retry, and the shuffle beforehand keeps it from depending on id order.
-    """
+    # patient -> their cases
     groups: dict[str, list[str]] = {}
     for cid in sorted(case_ids):
         groups.setdefault(patient_of(cid), []).append(cid)
@@ -53,6 +42,7 @@ def make_folds(case_ids: list[str], n_folds: int = 5, seed: int = 42) -> list[li
     rng = np.random.default_rng(seed)
     names = list(groups)
     rng.shuffle(names)
+    # Stable sort: patients with the same number of scans keep their shuffled order.
     names.sort(key=lambda p: len(groups[p]), reverse=True)
 
     folds: list[list[str]] = [[] for _ in range(n_folds)]
@@ -63,13 +53,15 @@ def make_folds(case_ids: list[str], n_folds: int = 5, seed: int = 42) -> list[li
     return [sorted(f) for f in folds]
 
 
+# The folds: read from the saved file if it exists, built and saved otherwise.
 def get_folds(case_ids: list[str] = None, n_folds: int = 5, seed: int = 42,
-             splits_json: str = None) -> list[list[str]]:
+              splits_json: str = None) -> list[list[str]]:
     path = splits_json or SPLITS_JSON
 
     if os.path.exists(path):
         with open(path) as f:
             saved = json.load(f)
+        # An old split built by shuffling case ids would leak patients across folds.
         if not saved.get("grouped_by_patient"):
             raise RuntimeError(
                 f"{path} predates patient grouping: it was built by shuffling case ids, "
@@ -91,6 +83,7 @@ def get_folds(case_ids: list[str] = None, n_folds: int = 5, seed: int = 42,
     return folds
 
 
+# (training cases, validation cases) for one fold.
 def fold_split(folds: list[list[str]], fold: int) -> tuple[list[str], list[str]]:
     val = folds[fold]
     train = [cid for k, f in enumerate(folds) if k != fold for cid in f]
