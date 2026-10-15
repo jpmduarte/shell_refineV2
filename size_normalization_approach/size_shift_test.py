@@ -18,7 +18,7 @@
 # 16-1040 mL); outside it, including a pass 1 that finds no head (k = 0), the method falls
 # back to pass 1's own segmentation (the plain x4 mask), and the case is counted. Without
 # that rule a tiny but non-zero estimate asks for a normalised grid far too large for the
-# GPU. The deployed pipeline (bench_pipeline.py) has no such rule yet.
+# GPU. The deployed pipeline (bench_pipeline.py run_case, k_range) now applies the same rule.
 #
 # Assumes the cache's geometry: RAS, isotropic voxels (0.4 mm), so the affine is diagonal.
 #

@@ -64,8 +64,7 @@ prevents.
 - The volume error here is on the volume itself (4.3% median at the original size). The
   1.4% quoted in results.md and docs/pipeline.md is the error of the linear scale k, not of
   the volume.
-- The deployed pipeline (scripts/bench_pipeline.py) has no guard yet: a pass 1 that finds
-  no head gives an infinite spacing, and a tiny estimate an out-of-memory grid. The
-  fallback used here is the obvious candidate.
+- The deployed pipeline (scripts/bench_pipeline.py `run_case`) now has the same guard:
+  outside 0.5 ≤ k ≤ 2 it returns pass 1's segmentation (see pass1_volume_results.md).
 - The geometry assumes the cache's: RAS, isotropic 0.4 mm voxels. The volume scales as s³
   as intended (median 128 mL × s³ matches the measured medians at every scale).

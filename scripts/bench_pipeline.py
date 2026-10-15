@@ -140,11 +140,16 @@ class Clock:
 # v0_ml is the canonical head volume the second-pass networks were trained at (read from
 # their training cache). blend > 0 mixes pass 1's SDF into the final one:
 # blend x pass 1 + (1 - blend) x pass 2.
-@torch.no_grad()
 # factor2, cube2 and mask2 describe the second-pass networks (the resolution study: x2 in
 # 192^3, mask outputs); the first pass is always the plain x4 SDF network.
+#
+# k_range guards the normalisation: pass 1's scale k = (V / V0)^(1/3) is used only within
+# it (0.5-2: a head of about 16-1040 mL). Outside it, including a pass 1 that finds no head
+# (k = 0, an infinite spacing) or a tiny estimate (a grid too large for the GPU), the case
+# returns pass 1's own segmentation instead (size_normalization_approach/size_shift_test.py).
+@torch.no_grad()
 def run_case(img1, aff1, pass1, models2, tta, dev, clock, v0_ml, fast=True, blend=0.0,
-             factor2=4, cube2=CUBE, mask2=False):
+             factor2=4, cube2=CUBE, mask2=False, k_range=(0.5, 2.0)):
     to_grid, to_native = ((to_grid_fast, to_native_fast) if fast
                           else (to_grid_geometry, to_native_geometry))
     shape1 = img1.shape
@@ -171,14 +176,21 @@ def run_case(img1, aff1, pass1, models2, tta, dev, clock, v0_ml, fast=True, blen
         # The number of voxels where pass 1's SDF is negative, times the voxel volume
         # (mm^3 -> mL).
         volume_ml = float((f4 < 0).sum()) * (4 * native_spacing) ** 3 / 1000
+        k = (volume_ml / v0_ml) ** (1 / 3)
         if blend > 0 and tta:
             f4 = f4_blend
+
+    # No usable scale: fall back to pass 1's segmentation.
+    if not k_range[0] <= k <= k_range[1]:
+        with clock.span("SDF to native grid"):
+            field = to_native(f4, aff4, aff1, shape1)
+        with clock.span("threshold + to host"):
+            return (field < 0).cpu()
 
     with clock.span("to normalised grid"):
         # The spacing that shows this head at the canonical size. Unlike size_norm.py
         # there is no cube cap: a larger grid is padded instead (pad()), keeping the
         # canonical size; coarsening to fit cost 0.028 Dice on a scan 17% too large.
-        k = (volume_ml / v0_ml) ** (1 / 3)
         xn, affn = to_grid(x1, aff1, factor2 * native_spacing * k)
 
     with clock.span("net: pass 2"):
