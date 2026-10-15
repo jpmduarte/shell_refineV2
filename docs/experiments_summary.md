@@ -34,7 +34,12 @@ compared with the reference on those folds only.
 | refiner: cascade at x2 (`phase2_v2`) | phase 2 | no gain on the x4 prior | dropped |
 | refiner: 1D surface profiles (+ context) | phase 2 | no gain | dropped |
 | refiner: native band, 64³ cubes, on ens+TTA priors | phase 2 | ±0.0000 to −0.0004 (seed 42, 2 folds); 2–10 s per case | dropped: no gain at 10–30× cost |
-| x4 / x4 norm + Gaussian contour head + consistency | multi-task head | *running* | — |
+| x4 norm + Gaussian contour head + consistency | multi-task head | −0.0002 (p = 0.81), 3 seeds | no gain |
+| x4 norm + soft-mask Dice + BCE on the SDF | loss | −0.0005 (p = 0.30); ens + TTA −0.0003 | no gain |
+| x4 norm + 2× fine input (8 channels, space-to-depth) | input | −0.0003 (p = 0.90); ens + TTA −0.0002 | no gain |
+| resolution × loss, size-normalised, seed 42 (vs x4 SDF 0.9466) | resolution / loss | x8 SDF 0.9442, x8 mask 0.9423, x4 mask 0.9453 (p = 0.057; ties with TTA, 0.9480 vs 0.9477); x2 fold 0 only: SDF 0.9371, mask 0.9359 vs 0.9437 | x4 SDF kept; x2 stopped (27 GB to train at batch 4, 3.3–6.7× slower inference) |
+| representation ceiling (perfect coarse target → native) | analysis | SDF x8 / x4 / x2: 0.9961 / 0.9979 / 0.9995; mask 0.9755 / 0.9874 / 0.9932 | the coarse grid is not the limit; the plain-x4 0.9967 is an artefact of the integer factor 4 (4.04 gives 0.9980) |
+| x4 norm, 32 base channels (5.6M params) | architecture | 0.9433 vs 0.9437 (seed 42, fold 0 only) | cancelled: no sign of gain, ~2× training memory |
 | nnU-Net 3d_fullres, 250 / 1000 epochs | reference | 0.9484 / 0.9497; + TTA 0.9496 / **0.9510** | our best: −0.0010 vs 1000 (n.s.), −0.0022 vs 1000 + TTA |
 
 ## Early protocol
@@ -84,7 +89,10 @@ compared with the reference on those folds only.
 
 - **What moved the result:** the surface-weighted loss, x4 resolution, size normalisation,
   TTA and seed ensembles.
-- **Never helped, whatever the form:** capacity (deeper or wider networks), attention or
-  gates, InstanceNorm, regularisation, gradient losses, post-processing.
+- **Never helped, whatever the form:** capacity (a 4th pooling level; 32 base channels on
+  one fold), attention or gates, InstanceNorm, regularisation, gradient losses, boundary
+  losses (contour head, soft mask), finer input, a finer grid (x2), post-processing.
+- **SDF against a mask target:** the SDF wins without TTA (x8 +0.0019, x4 +0.0013) and
+  loses 4–6× less at the representation ceiling; with TTA the x4 mask ties (seed 42).
 - **The refiner's gain shrinks as the prior improves.** It reaches zero at a prior Dice of
   ~0.946, and our priors are now 0.946–0.949.

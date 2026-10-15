@@ -104,6 +104,44 @@ Set aside: depth 4 (no gain for 4× params), joint training (no robust gain over
 size-only; on standby), and the phase 2 refiners (cascade `phase2_v2`, 1D surface profiles
 `phase2_profile`), which did not improve the x4 prior.
 
+On the size-normalised network (against nnaug_x4norm, 3 seeds × 5 folds, paired Wilcoxon):
+a Gaussian contour head −0.0002 (p = 0.81), soft-mask Dice + BCE −0.0005 (p = 0.30), a 2×
+finer input in 8 channels −0.0003 (p = 0.90); with ensemble + TTA all within ±0.0003. 32
+base channels (5.6 M params): 0.9433 against 0.9437 on seed 42 fold 0, then cancelled.
+
+## Resolution and loss (size-normalised, seed 42, 5 folds)
+
+Same network and recipe; only the grid (`--factor`) and the target (`--loss sdf|mask`)
+change. The mask arm is Dice + BCE on the head mask (nnU-Net's binary loss); its
+probability is carried to the native grid and cut at 0.5. Paired Wilcoxon against x4 SDF.
+Inference on all 90 cases, 3 repeats (`bench_pipeline.py --pass2-factor`).
+
+| Grid | Loss | Dice | Dice + TTA | HD95 | ASD | ms, one model / + TTA |
+|---|---|---|---|---|---|---|
+| x8 (48³) | SDF | 0.9442 (p = 0.013) | 0.9467 | 3.29 | 1.096 | 27 / 40 |
+| x8 | mask | 0.9423 (p < 0.001) | 0.9453 | 3.23 | 1.121 | 27 / 40 |
+| **x4 (96³)** | **SDF** | **0.9466** | 0.9477 | **3.14** | **1.049** | 36 / 115 |
+| x4 | mask | 0.9453 (p = 0.057) | 0.9480 | 3.20 | 1.069 | 36 / 115 |
+| x2 (192³), fold 0 only | SDF | 0.9371 (x4: 0.9437) | 0.9377 | 3.97 | 1.243 | 118 / 774 |
+| x2, fold 0 only | mask | 0.9359 | — | 5.09 | 1.338 | 118 / 774 |
+
+x2 needs 27 GB to train at batch 4; on the 12 GB card it ran at batch 1 with 4-batch
+gradient accumulation (`--accum 4`), 6.2 h per fold, and was stopped after fold 0. The SDF
+beats the mask without TTA at x8 and x4; with TTA the x4 mask ties.
+
+**Representation ceiling** — the true target on the coarse grid, carried to native and
+thresholded, as a perfect network would predict it (90 cases):
+
+| Grid | SDF | mask |
+|---|---|---|
+| x8 normalised | 0.9961 | 0.9755 |
+| x4 normalised | 0.9979 | 0.9874 |
+| x2 normalised | 0.9995 | 0.9932 |
+
+The coarse grid is not the limit. The plain-x4 ceiling (0.9967) is lower only because the
+integer factor 4 samples the native voxel centres, where the voxel-wise SDF jumps ±0.4 mm;
+factors 3.96 or 4.04 give 0.9980.
+
 ## Efficiency (same machine)
 
 RTX 5070 12 GB, Ryzen 7 8700F (8 cores / 16 threads), 32 GB RAM, Windows 11, PyTorch 2.12.
@@ -111,25 +149,43 @@ The GPU ran nothing else.
 
 ### Inference
 
-Fold 0, 18 cases, after 2 warm-up cases. Time from the native volume in memory to the native
-mask (z-score, both passes, all resampling, threshold); disk reading excluded for both.
-nnU-Net through `nnUNetPredictor` (crop, z-score, sliding window with Gaussian blending,
-step 0.5, export). `scripts/bench_pipeline.py`, `scripts/bench_nnunet.py`.
+All 90 cases (each fold's validation cases with that fold's networks), 3 timed repeats after
+2 warm-up cases, GPU synchronised at both ends of every stage, nothing else on the GPU.
+Time from the native volume in memory to the native mask in host memory, for both methods
+(z-score, all passes, all resampling, threshold, copy back); disk reading excluded. nnU-Net
+through `nnUNetPredictor` (crop, z-score, sliding window with Gaussian blending, step 0.5,
+export), the 250-epoch checkpoints (same network and plans as 1000 epochs, so the same cost).
+`scripts/bench_pipeline.py --folds 0 1 2 3 4 --repeats 3`, `scripts/bench_nnunet.py` (same
+flags); results in `docs/profiling/bench_ours_90.json`, `bench_nnunet_90.json`. The medians of
+the 3 repeats agree to the millisecond.
 
-| | Time / case (median) | GPU memory peak (allocated / reserved) | RAM peak (process) | CPU time / case | Params | Network passes | Dice, fold 0 |
-|---|---|---|---|---|---|---|---|
-| **Ours, one model** | **35 ms** | 0.70 / 1.70 GB | 1.46 GB | 0.07 s | 2.80 M | 2 | 0.9438 |
-| **Ours, one model + TTA** | **115 ms** | 0.70 / 1.71 GB | 1.52 GB | 0.14 s | 2.80 M | 9 | 0.9454 |
-| **Ours, ensemble of 3 + TTA** | **309 ms** | 0.70 / 1.71 GB | 1.52 GB | 0.22 s | 5.61 M | 25 | 0.9460 |
-| nnU-Net | 1348 ms | 1.43 / 1.82 GB | 1.96 GB | 0.71 s | 30.8 M | sliding window | 0.9481 |
-| nnU-Net + TTA | 8903 ms | 1.44 / 1.82 GB | 2.01 GB | 2.19 s | 30.8 M | sliding window × 8 | 0.9481 |
+| | Time / case, median | p5–p95 | Networks only | Pipeline around them | Network passes | Params |
+|---|---|---|---|---|---|---|
+| x4, one model | 23 ms | 21–31 | 11.5 | 11.8 | 1 | 1.40 M |
+| x4, one model + TTA | 103 ms | 101–111 | 91.2 | 11.9 | 8 | 1.40 M |
+| x4, ensemble of 3 | 46 ms | 44–54 | 34.1 | 11.6 | 3 | 4.20 M |
+| x4, ensemble of 3 + TTA | 284 ms | 282–292 | 272.1 | 11.8 | 24 | 4.20 M |
+| **size-norm, one model** | **35 ms** | 33–43 | 22.9 | 12.4 | 2 | 2.80 M |
+| **size-norm, one model + TTA** | **115 ms** | 113–123 | 102.2 | 12.6 | 9 | 2.80 M |
+| **size-norm, ensemble of 3** | **58 ms** | 56–66 | 45.6 | 12.6 | 4 | 5.61 M |
+| **size-norm, ensemble of 3 + TTA** | **296 ms** | 294–304 | 283.6 | 12.6 | 25 | 5.61 M |
+| nnU-Net | 1339 ms | 935–2345 | — | — | sliding window | 30.8 M |
+| nnU-Net + TTA | 8870 ms | 5956–15733 | — | — | sliding window × 8 | 30.8 M |
 
-- One model + TTA is **77× faster** than nnU-Net + TTA and **12× faster** than nnU-Net
-  without TTA; the full ensemble + TTA is 29× faster than nnU-Net + TTA. 11× fewer
-  parameters (2.8 M vs 30.8 M), half the GPU memory.
-- RAM includes the PyTorch/CUDA runtime (~1.4 GB for both).
-- Our stages (one model + TTA, median ms): z-score 5, pass 1 12, normalise 1, pass 2 91,
-  back to native 6.
+- Size-norm one model is **38× faster** than nnU-Net; with TTA, 12× faster than nnU-Net
+  without TTA and 77× faster than nnU-Net + TTA; the ensemble + TTA is 30× faster than
+  nnU-Net + TTA. Ours barely varies with the scan (always a 96³ cube); nnU-Net's sliding
+  window scales with the volume.
+- "Pipeline around them" is everything but the networks: z-score 4.5, to x4 grid 0.7, head
+  volume 0.2, to the normalised grid 0.6, SDF to the native grid 5.2, threshold + copy to
+  host 1.3 (median ms). About 12 ms in every configuration.
+- GPU memory peak: ours 0.95 GB allocated, nnU-Net 1.9 GB. CPU per case: ours 0.03–0.17 s,
+  nnU-Net 0.62 s (1.85 s with TTA). RAM includes the PyTorch/CUDA runtime (~1.4 GB).
+- The contour-head, soft-mask and fine-input arms use the same inference network, so they
+  cost the same (fine input would add the 2× grid resampling).
+- Turning a label into the SDF training target (`scripts/bench_sdf.py`): 1.7 s per case
+  median (1.3–3.4 s), 3 min for the 90 cases, almost all in the exact distance transform at
+  native resolution. A one-off cache-building cost; inference never does it.
 - Resampling uses `geometry.affine_resample` (analytic grid on the GPU). The older path
   (`Spacingd` on the CPU, `resample_grid`'s per-voxel float64 grid) gives identical Dice but
   costs 107 / 185 / 365 ms, 1.56 GB allocated and 1.2–1.9 s CPU per case.
