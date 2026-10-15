@@ -52,8 +52,8 @@ watching when they ended.
 
 Changing how any of that is written means bumping VERSION. A runner will adopt jobs
 started by an older one, but warns when it does: those jobs write no outcome record, so
-if they end unwatched they will look like crashes. scripts/outcome_watcher.py fills
-that gap without restarting the runner and discarding work in progress.
+if they end unwatched they will look like crashes; check their logs before trusting
+the verdict.
 
 Both memories gate a launch. VRAM is the obvious one; system RAM is the one that bit —
 four slab folds fit easily in 12 GB of VRAM and still took 31 of 32 GB of RAM, because
@@ -461,7 +461,7 @@ def main():
                       f"not write outcome records.\n"
                       f"  If this process ends while no runner is watching, its result "
                       f"will look like a crash.\n"
-                      f"  scripts/outcome_watcher.py covers that gap.")
+                      f"  Check its log before trusting the verdict.")
             if job.log_path:
                 print(f"                     log: {job.log_path}")
         else:
