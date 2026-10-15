@@ -1,0 +1,238 @@
+{
+ "x4: one model": {
+  "ms_median": 23.256999993463978,
+  "ms_mean": 24.30681370099558,
+  "network_ms_median": 11.47349999519065,
+  "pipeline_ms_median": 11.759800021536648,
+  "ms_p5": 21.107044981908984,
+  "ms_p95": 31.043019983917475,
+  "ms_median_per_repeat": [
+   23.4183999709785,
+   23.243350005941465,
+   23.194250068627298
+  ],
+  "n_timed": 270,
+  "stages_ms_median": {
+   "z-score": 4.519700014498085,
+   "to x4 grid": 0.745400000596419,
+   "net: x4": 11.47349999519065,
+   "SDF to native grid": 5.20564999897033,
+   "threshold + to host": 1.3166999851819128
+  },
+  "gpu_peak_allocated_mb": 948.69775390625,
+  "gpu_peak_reserved_mb": 3236.0,
+  "ram_peak_mb": 1503.99609375,
+  "cpu_s_per_case": 0.025173611111111112,
+  "networks_run": 1,
+  "parameters": 1401265,
+  "dice_mean": 0.9438401712171713
+ },
+ "x4: one model + TTA": {
+  "ms_median": 103.20669997599907,
+  "ms_mean": 104.13730481587764,
+  "network_ms_median": 91.22244999161921,
+  "pipeline_ms_median": 11.852399969939142,
+  "ms_p5": 100.95621997897979,
+  "ms_p95": 111.03536995651666,
+  "ms_median_per_repeat": [
+   103.25145002570935,
+   103.05419994983822,
+   103.2180999754928
+  ],
+  "n_timed": 270,
+  "stages_ms_median": {
+   "z-score": 4.488949954975396,
+   "to x4 grid": 0.7394500426016748,
+   "net: x4": 91.22244999161921,
+   "SDF to native grid": 5.343399971025065,
+   "threshold + to host": 1.3382500037550926
+  },
+  "gpu_peak_allocated_mb": 948.69775390625,
+  "gpu_peak_reserved_mb": 3242.0,
+  "ram_peak_mb": 1578.515625,
+  "cpu_s_per_case": 0.10543981481481482,
+  "networks_run": 8,
+  "parameters": 1401265,
+  "dice_mean": 0.9465915811703851
+ },
+ "x4: ensemble of 3": {
+  "ms_median": 45.77644992968999,
+  "ms_mean": 46.684022590785325,
+  "network_ms_median": 34.11174999200739,
+  "pipeline_ms_median": 11.63810002617538,
+  "ms_p5": 43.653379948227666,
+  "ms_p95": 53.723564924439415,
+  "ms_median_per_repeat": [
+   45.9042000293266,
+   45.66650002379902,
+   45.73325009550899
+  ],
+  "n_timed": 270,
+  "stages_ms_median": {
+   "z-score": 4.454299982171506,
+   "to x4 grid": 0.7259999983943999,
+   "net: x4": 34.11174999200739,
+   "SDF to native grid": 5.204249988310039,
+   "threshold + to host": 1.2981000181753188
+  },
+  "gpu_peak_allocated_mb": 948.69775390625,
+  "gpu_peak_reserved_mb": 3242.0,
+  "ram_peak_mb": 1569.61328125,
+  "cpu_s_per_case": 0.04722222222222222,
+  "networks_run": 3,
+  "parameters": 4203795,
+  "dice_mean": 0.946806322428145
+ },
+ "x4: ensemble of 3 + TTA": {
+  "ms_median": 283.9976000250317,
+  "ms_mean": 284.8340088874533,
+  "network_ms_median": 272.1105499949772,
+  "pipeline_ms_median": 11.795849917689338,
+  "ms_p5": 281.674829981057,
+  "ms_p95": 291.7150400142418,
+  "ms_median_per_repeat": [
+   283.96209998754784,
+   283.9555000246037,
+   284.0866999758873
+  ],
+  "n_timed": 270,
+  "stages_ms_median": {
+   "z-score": 4.502950003370643,
+   "to x4 grid": 0.7370999956037849,
+   "net: x4": 272.1105499949772,
+   "SDF to native grid": 5.29969998751767,
+   "threshold + to host": 1.3215499930083752
+  },
+  "gpu_peak_allocated_mb": 948.69775390625,
+  "gpu_peak_reserved_mb": 3244.0,
+  "ram_peak_mb": 1578.625,
+  "cpu_s_per_case": 0.16203703703703703,
+  "networks_run": 24,
+  "parameters": 4203795,
+  "dice_mean": 0.9479041320772138
+ },
+ "one model": {
+  "ms_median": 35.341300012078136,
+  "ms_mean": 36.21975517922288,
+  "network_ms_median": 22.89809999638237,
+  "pipeline_ms_median": 12.39660001010634,
+  "ms_p5": 33.11103004380129,
+  "ms_p95": 43.17172493610997,
+  "ms_median_per_repeat": [
+   35.43879999779165,
+   35.33954999875277,
+   35.22895005880855
+  ],
+  "n_timed": 270,
+  "stages_ms_median": {
+   "z-score": 4.525249998550862,
+   "to x4 grid": 0.7299499993678182,
+   "net: pass 1": 11.463750008260831,
+   "head volume": 0.16044999938458204,
+   "to normalised grid": 0.6181500211823732,
+   "net: pass 2": 11.432400002377108,
+   "SDF to native grid": 5.1421500102151185,
+   "threshold + to host": 1.294449990382418
+  },
+  "gpu_peak_allocated_mb": 950.18115234375,
+  "gpu_peak_reserved_mb": 3244.0,
+  "ram_peak_mb": 1606.41015625,
+  "cpu_s_per_case": 0.03726851851851852,
+  "networks_run": 2,
+  "parameters": 2802530,
+  "dice_mean": 0.9467123319424232
+ },
+ "one model + TTA": {
+  "ms_median": 114.95829999330454,
+  "ms_mean": 115.84682740353013,
+  "network_ms_median": 102.24209999432787,
+  "pipeline_ms_median": 12.62009996571578,
+  "ms_p5": 112.64163501909934,
+  "ms_p95": 122.80827986251097,
+  "ms_median_per_repeat": [
+   114.91185007616878,
+   114.80770001071505,
+   115.20664999261498
+  ],
+  "n_timed": 270,
+  "stages_ms_median": {
+   "z-score": 4.49370002024807,
+   "to x4 grid": 0.7381499744951725,
+   "net: pass 1": 11.474600003566593,
+   "head volume": 0.16234995564445853,
+   "to normalised grid": 0.622349965851754,
+   "net: pass 2": 90.75884998310357,
+   "SDF to native grid": 5.286600033286959,
+   "threshold + to host": 1.3267999747768044
+  },
+  "gpu_peak_allocated_mb": 950.18115234375,
+  "gpu_peak_reserved_mb": 3246.0,
+  "ram_peak_mb": 1615.76171875,
+  "cpu_s_per_case": 0.11568287037037037,
+  "networks_run": 9,
+  "parameters": 2802530,
+  "dice_mean": 0.9476724748889473
+ },
+ "ensemble of 3": {
+  "ms_median": 58.28415002906695,
+  "ms_mean": 59.13724481770596,
+  "network_ms_median": 45.56895003770478,
+  "pipeline_ms_median": 12.599349924130365,
+  "ms_p5": 55.99891002930235,
+  "ms_p95": 66.33193990273867,
+  "ms_median_per_repeat": [
+   58.33414994413033,
+   58.329550112830475,
+   57.95479993685149
+  ],
+  "n_timed": 270,
+  "stages_ms_median": {
+   "z-score": 4.485999990720302,
+   "to x4 grid": 0.7385000062640756,
+   "net: pass 1": 11.473799997474998,
+   "head volume": 0.16945000970736146,
+   "to normalised grid": 0.6249500147532672,
+   "net: pass 2": 34.0917999856174,
+   "SDF to native grid": 5.2278999937698245,
+   "threshold + to host": 1.3182499969843775
+  },
+  "gpu_peak_allocated_mb": 950.18115234375,
+  "gpu_peak_reserved_mb": 3246.0,
+  "ram_peak_mb": 1615.8046875,
+  "cpu_s_per_case": 0.05896990740740741,
+  "networks_run": 4,
+  "parameters": 5605060,
+  "dice_mean": 0.9479198861115294
+ },
+ "ensemble of 3 + TTA": {
+  "ms_median": 296.36924996157177,
+  "ms_mean": 297.1515925874916,
+  "network_ms_median": 283.62179998657666,
+  "pipeline_ms_median": 12.632050027605146,
+  "ms_p5": 293.98894501209725,
+  "ms_p95": 303.987944975961,
+  "ms_median_per_repeat": [
+   296.3778000266757,
+   296.2954500399064,
+   296.4321499457583
+  ],
+  "n_timed": 270,
+  "stages_ms_median": {
+   "z-score": 4.489349987125024,
+   "to x4 grid": 0.741700001526624,
+   "net: pass 1": 11.484599992400035,
+   "head volume": 0.1598999951966107,
+   "to normalised grid": 0.6210000137798488,
+   "net: pass 2": 272.13189998292364,
+   "SDF to native grid": 5.3038999903947115,
+   "threshold + to host": 1.3112499727867544
+  },
+  "gpu_peak_allocated_mb": 950.18115234375,
+  "gpu_peak_reserved_mb": 3248.0,
+  "ram_peak_mb": 1616.09765625,
+  "cpu_s_per_case": 0.1745949074074074,
+  "networks_run": 25,
+  "parameters": 5605060,
+  "dice_mean": 0.9485704940371542
+ }
+}

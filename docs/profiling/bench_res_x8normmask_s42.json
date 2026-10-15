@@ -1,0 +1,64 @@
+{
+ "one model": {
+  "ms_median": 26.45969993318431,
+  "ms_mean": 27.53127777207367,
+  "network_ms_median": 13.910350011428818,
+  "pipeline_ms_median": 12.46824991540052,
+  "ms_p5": 24.26632493152283,
+  "ms_p95": 34.574159973999485,
+  "ms_median_per_repeat": [
+   26.553649979177862,
+   26.358099974459037,
+   26.341449934989214
+  ],
+  "n_timed": 270,
+  "stages_ms_median": {
+   "z-score": 4.480500007048249,
+   "to x4 grid": 0.7407999946735799,
+   "net: pass 1": 11.4921499916818,
+   "head volume": 0.17899999511428177,
+   "to normalised grid": 0.6377999961841851,
+   "net: pass 2": 2.4042500008363277,
+   "SDF to native grid": 5.163950030691922,
+   "threshold + to host": 1.311450032517314
+  },
+  "gpu_peak_allocated_mb": 814.7021484375,
+  "gpu_peak_reserved_mb": 3086.0,
+  "ram_peak_mb": 1556.4921875,
+  "cpu_s_per_case": 0.02789351851851852,
+  "networks_run": 2,
+  "parameters": 2802530,
+  "dice_mean": 0.9421926768900868
+ },
+ "one model + TTA": {
+  "ms_median": 39.513150055427104,
+  "ms_mean": 40.4445855576476,
+  "network_ms_median": 27.078049984993413,
+  "pipeline_ms_median": 12.37569996737875,
+  "ms_p5": 37.2193299990613,
+  "ms_p95": 47.442505008075386,
+  "ms_median_per_repeat": [
+   39.55855002277531,
+   39.49774999637157,
+   39.444099966203794
+  ],
+  "n_timed": 270,
+  "stages_ms_median": {
+   "z-score": 4.4743499893229455,
+   "to x4 grid": 0.7345500052906573,
+   "net: pass 1": 11.486300005344674,
+   "head volume": 0.169149978319183,
+   "to normalised grid": 0.5920999683439732,
+   "net: pass 2": 15.599599981214851,
+   "SDF to native grid": 5.148299998836592,
+   "threshold + to host": 1.3080500066280365
+  },
+  "gpu_peak_allocated_mb": 814.7021484375,
+  "gpu_peak_reserved_mb": 3088.0,
+  "ram_peak_mb": 1630.9140625,
+  "cpu_s_per_case": 0.04201388888888889,
+  "networks_run": 9,
+  "parameters": 2802530,
+  "dice_mean": 0.9452763984096413
+ }
+}

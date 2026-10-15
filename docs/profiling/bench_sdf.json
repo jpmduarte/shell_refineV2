@@ -1,0 +1,13 @@
+{
+ "cases": 90,
+ "ms_median": 1724.0487500093877,
+ "ms_mean": 1944.3238300103176,
+ "ms_p5": 1294.034245016519,
+ "ms_p95": 3409.5525049895514,
+ "all_cases_s": 174.9891447009286,
+ "stages_ms_median": {
+  "distance transform (native)": 1680.295499972999,
+  "truncate + normalise": 26.862700004130602,
+  "resample to x4": 18.062599963741377
+ }
+}
