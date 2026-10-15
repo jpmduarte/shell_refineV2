@@ -15,6 +15,7 @@
 # ties it to the contour implied by the predicted SDF. Prediction still uses the SDF alone.
 
 import argparse
+import json
 import os
 import sys
 
@@ -29,7 +30,8 @@ sys.path.insert(0, PARENT)
 
 from cache import case_ids  # noqa: E402
 from dataset import CUBE, FACTOR, SDFDataset  # noqa: E402
-from loss import gaussian_contour, surface_weighted_l1  # noqa: E402
+from fine_input import FINE, FineSDFDataset  # noqa: E402
+from loss import gaussian_contour, mask_dice_bce, soft_mask_dice_bce, surface_weighted_l1  # noqa: E402
 from metrics import boundary_dice_from_sdf, dice_from_sdf, mae  # noqa: E402
 from model import UNet3D  # noqa: E402
 from profiler import Profiler, model_summary  # noqa: E402
@@ -51,13 +53,27 @@ def seed_worker(worker_id):
 #   consistency  MSE between the contour head and the contour of the predicted SDF, so
 #                the two outputs agree (Torres et al.'s segmentation-to-contour term);
 #                weighted by consistency_coef, 0 during the warm-up epochs
+#
+# With loss_mode "mask" the network is trained as an ordinary segmenter instead: its logits
+# against the head mask (the sign of the SDF target) with Dice + BCE, and no SDF terms.
+#
+# With soft_mask_coef > 0: Dice + BCE between soft masks of the predicted and the true SDF
+# (sigmoid(-d / tau), loss.py), on top of the L1 terms, which stay: they keep the output a
+# distance field; this adds a penalty on the sign right at the surface, where Dice is decided.
 def train_epoch(model, loader, optimizer, device, sw_coef: float, sw_sigma: float,
                 contour_coef: float = 0.0, consistency_coef: float = 0.0,
-                contour_sigma: float = 1.5) -> float:
+                contour_sigma: float = 1.5, soft_mask_coef: float = 0.0,
+                soft_mask_tau: float = 0.5, loss_mode: str = "sdf", accum: int = 1) -> float:
     model.train()
     total_loss = 0.0
-    for x, y in loader:
+    optimizer.zero_grad()
+    for i, (x, y) in enumerate(loader):
         x, y = x.to(device), y.to(device)
+        if loss_mode == "mask":
+            loss = mask_dice_bce(model.logits(x), y)
+            total_loss += loss.item() * x.size(0)
+            _step(loss, optimizer, i, accum, len(loader))
+            continue
         if contour_coef > 0:
             pred, contour = model.forward_with_contour(x)
         else:
@@ -71,19 +87,32 @@ def train_epoch(model, loader, optimizer, device, sw_coef: float, sw_sigma: floa
             loss = loss + contour_coef * F.mse_loss(contour, gaussian_contour(y, contour_sigma))
             if consistency_coef > 0:
                 loss = loss + consistency_coef * F.mse_loss(contour, gaussian_contour(pred, contour_sigma))
+        if soft_mask_coef > 0:
+            loss = loss + soft_mask_coef * soft_mask_dice_bce(pred, y, soft_mask_tau)
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
         total_loss += loss.item() * x.size(0)
+        _step(loss, optimizer, i, accum, len(loader))
 
     return total_loss / len(loader.dataset)
+
+
+# Backpropagate one batch; step the optimizer every `accum` batches (and after the last).
+# With accum = 1 this is the ordinary step per batch. With accum > 1 the gradients of
+# `accum` batches are averaged before the step, which stands in for a batch `accum` times
+# larger when it does not fit in GPU memory (x2: batch 1, accum 4 for batch 4); only
+# BatchNorm still sees each batch on its own.
+def _step(loss, optimizer, i: int, accum: int, n_batches: int):
+    (loss / accum).backward()
+    if (i + 1) % accum == 0 or i + 1 == n_batches:
+        optimizer.step()
+        optimizer.zero_grad()
 
 
 # Scores on the validation cases, for the training curves only:
 # (L1 loss, MAE, Dice, boundary Dice), each averaged over cases.
 @torch.no_grad()
-def val_epoch(model, loader, device, band_mm: float) -> tuple[float, float, float, float]:
+def val_epoch(model, loader, device, band_mm: float,
+              loss_mode: str = "sdf") -> tuple[float, float, float, float]:
     model.eval()
     total_loss   = 0.0
     mae_scores   = []
@@ -92,7 +121,8 @@ def val_epoch(model, loader, device, band_mm: float) -> tuple[float, float, floa
 
     for x, y in loader:
         x, y = x.to(device), y.to(device)
-        pred = model(x)
+        # A mask network's probability p is scored as the field 1 - 2p, negative inside.
+        pred = model(x) if loss_mode == "sdf" else 1 - 2 * torch.sigmoid(model.logits(x))
         total_loss += F.l1_loss(pred, y).item() * x.size(0)
 
         # Per case within the batch. Dice is None when undefined (both masks empty).
@@ -134,6 +164,25 @@ def main():
                    help="weight of the SDF-to-contour consistency loss")
     p.add_argument("--consistency-start", type=int, default=50,
                    help="epoch from which the consistency loss is on (a warm-up without it)")
+    p.add_argument("--soft-mask-coef", type=float, default=0.0,
+                   help="weight of Dice + BCE on soft masks of the SDF; 0 = off")
+    p.add_argument("--soft-mask-tau", type=float, default=0.5,
+                   help="mm, width of the soft mask's inside-to-outside transition")
+    p.add_argument("--fine-input", action="store_true",
+                   help="feed the image at 2x detail as 8 channels (fine_input.py; needs "
+                        "<cache>/x4fine, built by python fine_input.py --cache-dir <cache>)")
+    p.add_argument("--loss",        type=str,   default="sdf", choices=["sdf", "mask"],
+                   help="sdf: regress the SDF (L1 + surface-weighted L1, the method); mask: an "
+                        "ordinary segmenter, Dice + BCE on the head mask (the resolution study)")
+    p.add_argument("--factor",      type=int,   default=FACTOR,
+                   help="the grid, as a multiple of the native spacing; needs <cache>/x<factor>")
+    p.add_argument("--cube",        type=int,   default=None,
+                   help="training cube per axis; default 96 x 4 / factor")
+    p.add_argument("--base-ch",     type=int,   default=16,
+                   help="channels at the top level, doubling per level (32: 32-64-128, ~4x parameters)")
+    p.add_argument("--accum",       type=int,   default=1,
+                   help="batches whose gradients are averaged per optimizer step (x2 on a "
+                        "12 GB GPU: --batch-size 1 --accum 4 stands in for batch 4)")
     p.add_argument("--band-mm",     type=float, default=5.0,
                    help="half-width in mm of the band for the logged boundary Dice")
     p.add_argument("--seed",        type=int,   default=None)
@@ -145,6 +194,11 @@ def main():
 
     run_dir = a.run_dir or os.path.join(HERE, "runs", f"fold{a.fold}")
     os.makedirs(run_dir, exist_ok=True)
+    cube = a.cube or CUBE * FACTOR // a.factor
+
+    # What predict.py needs to rebuild the input and read the output.
+    with open(os.path.join(run_dir, "config.json"), "w") as f:
+        json.dump({"factor": a.factor, "cube": cube, "loss": a.loss, "base_ch": a.base_ch}, f)
 
     # A seed makes the run reproducible: same initial weights, same batches, same
     # augmentation, and deterministic GPU kernels.
@@ -155,8 +209,9 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}  Fold: {a.fold}  Run: {run_dir}")
-    print(f"Loss: L1 + {a.sw_coef} x surface-weighted L1 @ {a.sw_sigma}mm  "
-          f"cache: {a.cache_dir}  x{FACTOR} padded to {CUBE}^3")
+    print((f"Loss: L1 + {a.sw_coef} x surface-weighted L1 @ {a.sw_sigma}mm  " if a.loss == "sdf"
+           else "Loss: Dice + BCE on the mask  ") +
+          f"cache: {a.cache_dir}  x{a.factor} padded to {cube}^3")
 
     # Which cases train and which validate.
     ids   = case_ids(a.cache_dir)
@@ -176,16 +231,19 @@ def main():
     worker_init = seed_worker
 
     train_loader = DataLoader(
-        SDFDataset(a.cache_dir, train_ids, augment=True, seed=a.seed),
+        FineSDFDataset(a.cache_dir, train_ids, augment=True, seed=a.seed) if a.fine_input else
+        SDFDataset(a.cache_dir, train_ids, augment=True, seed=a.seed, factor=a.factor, cube=cube),
         batch_size=a.batch_size, shuffle=True, num_workers=a.workers,
         pin_memory=True, generator=loader_gen, worker_init_fn=worker_init)
     val_loader = DataLoader(
-        SDFDataset(a.cache_dir, val_ids, augment=False, seed=a.seed),
+        FineSDFDataset(a.cache_dir, val_ids, augment=False, seed=a.seed) if a.fine_input else
+        SDFDataset(a.cache_dir, val_ids, augment=False, seed=a.seed, factor=a.factor, cube=cube),
         batch_size=a.batch_size, shuffle=False, num_workers=a.workers,
         pin_memory=True, generator=loader_gen, worker_init_fn=worker_init)
 
     # Adam, with the learning rate decaying along a cosine to 0 over the run.
-    model = UNet3D(contour_head=a.contour_coef > 0).to(device)
+    model = UNet3D(in_channels=FINE ** 3 if a.fine_input else 1, base_channels=a.base_ch,
+                   contour_head=a.contour_coef > 0).to(device)
     if a.contour_coef > 0:
         print(f"Contour head: coef {a.contour_coef}, sigma {a.contour_sigma} mm, consistency "
               f"{a.consistency_coef} from epoch {a.consistency_start}")
@@ -207,13 +265,14 @@ def main():
                 consistency = a.consistency_coef if epoch >= a.consistency_start else 0.0
                 train_loss = train_epoch(model, train_loader, optimizer, device,
                                          a.sw_coef, a.sw_sigma, a.contour_coef, consistency,
-                                         a.contour_sigma)
+                                         a.contour_sigma, a.soft_mask_coef, a.soft_mask_tau,
+                                         a.loss, a.accum)
                 s["items"] = len(train_loader.dataset)
 
             # Logged for the curves only; nothing is chosen from it.
             with prof.span("val_epoch"):
                 val_loss, val_mae, val_dice, val_bdice = val_epoch(
-                    model, val_loader, device, band_mm=a.band_mm)
+                    model, val_loader, device, band_mm=a.band_mm, loss_mode=a.loss)
 
             scheduler.step()
 

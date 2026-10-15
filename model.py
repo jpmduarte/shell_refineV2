@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-DEPTH = 3   # pooling levels; a fourth (5.6M parameters) was measured and gave nothing
+DEPTH = 3   # pooling levels; a fourth (5.6M parameters) gave nothing on plain x4
 
 
 # Two 3x3x3 convolutions, each followed by batch norm and ReLU. The nnU-Net's choices,
@@ -42,17 +42,21 @@ class UNet3D(nn.Module):
     # (exp(-d^2 / 2 sigma^2), 1 on the surface, 0 far from it) predicted from the same last
     # features (Torres et al., EMBC 2023). Created after every other layer, so with it off
     # the network, its checkpoints and a seeded initialisation are exactly as before.
-    def __init__(self, in_channels: int = 1, base_channels: int = 16, contour_head: bool = False):
+    # depth = pooling levels (3: 16-32-64, bottleneck 128; 4 adds a 128 level, bottleneck
+    # 256, and needs inputs divisible by 16).
+    def __init__(self, in_channels: int = 1, base_channels: int = 16, contour_head: bool = False,
+                 depth: int = DEPTH):
         super().__init__()
+        self.depth = depth
         # Channels per level, doubling at each pooling: 16, 32, 64.
-        ch = [base_channels * 2 ** i for i in range(DEPTH)]
+        ch = [base_channels * 2 ** i for i in range(depth)]
 
         # The layers are created by name (enc1, enc2, ..., up3, dec3, ...) and in this
         # order, because that is what the trained checkpoints contain and what a seeded
         # run initialises from.
 
         # Encoder: one block per level, halving the resolution between levels.
-        for i in range(DEPTH):
+        for i in range(depth):
             setattr(self, f"enc{i + 1}", ConvBlock(in_channels if i == 0 else ch[i - 1], ch[i]))
         self.pool = nn.MaxPool3d(2)
 
@@ -61,7 +65,7 @@ class UNet3D(nn.Module):
 
         # Decoder: upsample x2, join with the encoder output of the same level (skip
         # connection), one block.
-        for i in reversed(range(DEPTH)):
+        for i in reversed(range(depth)):
             setattr(self, f"up{i + 1}", nn.ConvTranspose3d(ch[i] * 2, ch[i], kernel_size=2,
                                                            stride=2))
             setattr(self, f"dec{i + 1}", ConvBlock(ch[i] * 2, ch[i]))
@@ -76,6 +80,11 @@ class UNet3D(nn.Module):
     def forward(self, x):
         return torch.tanh(self.head(self.features(x)))
 
+    # The head's raw output, without tanh: logits for a network trained on a mask
+    # (train.py --loss mask), where sigmoid gives the probability of "inside".
+    def logits(self, x):
+        return self.head(self.features(x))
+
     # Training with a contour head: (SDF, contour map).
     def forward_with_contour(self, x):
         d = self.features(x)
@@ -85,14 +94,14 @@ class UNet3D(nn.Module):
     def features(self, x):
         # Encoder, keeping each level's output for its skip connection.
         skips = []
-        for i in range(DEPTH):
+        for i in range(self.depth):
             x = getattr(self, f"enc{i + 1}")(x if i == 0 else self.pool(x))
             skips.append(x)
 
         d = self.bottleneck(self.pool(x))
 
         # Decoder, from the deepest level up.
-        for i in reversed(range(DEPTH)):
+        for i in reversed(range(self.depth)):
             skip = skips[i]
             up = self._match(getattr(self, f"up{i + 1}")(d), skip)
             d = getattr(self, f"dec{i + 1}")(torch.cat([up, skip], dim=1))

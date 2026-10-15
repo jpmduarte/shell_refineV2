@@ -24,15 +24,18 @@ CUBE = 96         # network input per axis: a multiple of 8 (three poolings) fit
 
 
 # (image, SDF) pairs from cache_dir/x4 and cache_dir/sdf/x4 (or sdf/x4mm when augmenting),
-# each of shape (1, 96, 96, 96).
+# each of shape (1, 96, 96, 96). `factor` and `cube` pick another grid (the resolution
+# study: x8 in 48^3, x2 in 192^3).
 class SDFDataset(Dataset):
 
     def __init__(self, cache_dir: str, case_ids: list[str], augment: bool = False,
-                 seed: int = None):
+                 seed: int = None, factor: int = FACTOR, cube: int = CUBE):
         self.cache_dir = cache_dir
         self.case_ids  = case_ids
         self.augment   = augment
-        mm_dir = os.path.join(cache_dir, "sdf", f"x{FACTOR}mm")
+        self.factor    = factor
+        self.cube      = cube
+        mm_dir = os.path.join(cache_dir, "sdf", f"x{factor}mm")
         if augment and not os.path.isdir(mm_dir):
             raise ValueError(f"augmentation needs the untruncated field {mm_dir} "
                              f"(make_sdf.py --untruncated, or size_norm.py)")
@@ -45,22 +48,22 @@ class SDFDataset(Dataset):
 
     def __getitem__(self, idx: int):
         cid = self.case_ids[idx]
-        img, _ = load_image(self.cache_dir, cid, FACTOR)
+        img, _ = load_image(self.cache_dir, cid, self.factor)
         img = img.astype(np.float32)
 
         if self.augment:
-            sdf_mm, _ = load_sdf_mm(self.cache_dir, cid, FACTOR)
-            img, sdf = augment_nnunet(img, sdf_mm.astype(np.float32), self._rng, CUBE)
+            sdf_mm, _ = load_sdf_mm(self.cache_dir, cid, self.factor)
+            img, sdf = augment_nnunet(img, sdf_mm.astype(np.float32), self._rng, self.cube)
         else:
-            sdf, _ = load_sdf(self.cache_dir, cid, FACTOR)
+            sdf, _ = load_sdf(self.cache_dir, cid, self.factor)
             # Pad the image with 0 and the SDF with +1 (outside; 0 would put a fake surface
             # along the padding). 0 is the z-scored volume's mean, not its background: about
             # half of each x4 volume is background, at -0.6 to -0.8, so the padding (like
             # the rotation fill in nnunet_augmentation) makes a step edge. Training,
             # predict.py and bench_pipeline.py all pad with 0, so they agree; changing it
             # would mean retraining.
-            img = pad_to_cube(img, CUBE, cval=0.0)
-            sdf = pad_to_cube(sdf.astype(np.float32), CUBE, cval=1.0)
+            img = pad_to_cube(img, self.cube, cval=0.0)
+            sdf = pad_to_cube(sdf.astype(np.float32), self.cube, cval=1.0)
 
         # Add the channel axis: (1, D, H, W).
         x = img[np.newaxis].astype(np.float32)

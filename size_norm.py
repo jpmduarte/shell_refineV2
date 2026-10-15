@@ -54,13 +54,15 @@ from geometry import downsample  # noqa: E402
 from make_sdf import signed_distance_mm  # noqa: E402
 
 TRUNC_MM = 10.0    # SDF truncation, as in make_sdf.py
-FACTOR = 4         # the grid normalised: x4
-CUBE = 96          # the network's input size per axis
+FACTOR = 4         # the grid normalised: x4 (--factor: 8 and 2 for the resolution study)
+CUBE = 96          # the network's input size per axis at x4; scales as 4 / factor
 
 
 # Link a folder of caches/cache/ into the new cache instead of copying it. On Windows a junction,
 # which needs no administrator rights (a directory symlink does).
 def link(src: str, dst: str):
+    # mklink needs Windows paths: absolute, with backslashes.
+    src, dst = os.path.abspath(src), os.path.abspath(dst)
     if os.path.exists(dst):
         return
     if os.name == "nt":
@@ -102,8 +104,14 @@ def main():
                    help="the training cache whose V0 to use (required with --volumes)")
     p.add_argument("--v0-ml", type=float, default=None,
                    help="override V0; default: the median head volume of the labels")
+    p.add_argument("--factor", type=int, default=FACTOR,
+                   help="the grid normalised, as a multiple of the native spacing (4: 1.6 mm)")
+    p.add_argument("--cube", type=int, default=None,
+                   help="the training cube per axis; default 96 x 4 / factor")
     p.add_argument("--limit", type=int, default=0, help="only the first N cases (testing)")
     a = p.parse_args()
+    base = a.factor
+    cube = a.cube or CUBE * FACTOR // a.factor
 
     estimates = json.load(open(a.volumes)) if a.volumes else None
     ids = case_ids(a.src)[:a.limit or None]
@@ -121,7 +129,7 @@ def main():
         p.error("--volumes needs --reference <training cache> (or --v0-ml)")
     print(f"V0 = {v0:.1f} mL", flush=True)
 
-    xf = f"x{FACTOR}"
+    xf = f"x{base}"
     for d in (xf, os.path.join("sdf", xf), os.path.join("sdf", xf + "mm")):
         os.makedirs(os.path.join(a.dst, d), exist_ok=True)
     link(os.path.join(a.src, "x1"), os.path.join(a.dst, "x1"))
@@ -145,14 +153,14 @@ def main():
         # The linear scale between this head and the canonical one, and the resulting
         # resampling factor relative to the native spacing.
         scale = (vol_ml / v0) ** (1 / 3)
-        factor = FACTOR * scale
+        factor = base * scale
 
         img4, affine4 = resample(img, affine, factor)
 
         # Too large for the cube: coarsen just enough to fit (+0.5% for shape rounding).
-        if max(img4.shape) > CUBE:
-            factor *= max(img4.shape) / CUBE * 1.005
-            scale = factor / FACTOR
+        if max(img4.shape) > cube:
+            factor *= max(img4.shape) / cube * 1.005
+            scale = factor / base
             img4, affine4 = resample(img, affine, factor)
 
         # The targets on exactly the same grid: the SDF in mm, then truncated and scaled.
@@ -172,9 +180,10 @@ def main():
               f"{time.time() - t0:4.1f}s", flush=True)
 
     with open(os.path.join(a.dst, "norm.json"), "w") as f:
-        json.dump({"v0_ml": v0, "oracle": estimates is None, "cases": meta}, f, indent=1)
+        json.dump({"v0_ml": v0, "oracle": estimates is None, "factor": base, "cube": cube,
+                   "cases": meta}, f, indent=1)
     shapes = np.array([m["shape"] for m in meta.values()])
-    print(f"\nlargest shape per axis {shapes.max(0)} (cube {CUBE})")
+    print(f"\nlargest shape per axis {shapes.max(0)} (cube {cube})")
 
 
 if __name__ == "__main__":
