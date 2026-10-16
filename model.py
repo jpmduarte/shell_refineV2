@@ -81,7 +81,8 @@ class UNet3D(nn.Module):
         return torch.tanh(self.head(self.features(x)))
 
     # The head's raw output, without tanh: logits for a network trained on a mask
-    # (train.py --loss mask), where sigmoid gives the probability of "inside".
+    # (the resolution study's mask networks; train.py no longer trains them), where
+    # sigmoid gives the probability of "inside".
     def logits(self, x):
         return self.head(self.features(x))
 

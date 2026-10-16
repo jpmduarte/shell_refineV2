@@ -9,10 +9,6 @@
 # validation fold, since that is the fold that gets reported.
 #
 # Writes <run-dir>/train_log.csv (one row per epoch) and <run-dir>/checkpoints/phase1_last.pth.
-#
-# --contour-coef > 0 adds a training-only contour head (Torres et al., EMBC 2023): the
-# network also predicts the Gaussian contour map of the surface, and a consistency loss
-# ties it to the contour implied by the predicted SDF. Prediction still uses the SDF alone.
 
 import argparse
 import json
@@ -30,7 +26,7 @@ sys.path.insert(0, PARENT)
 
 from cache import case_ids  # noqa: E402
 from dataset import CUBE, FACTOR, SDFDataset  # noqa: E402
-from loss import gaussian_contour, mask_dice_bce, soft_mask_dice_bce, surface_weighted_l1  # noqa: E402
+from loss import surface_weighted_l1  # noqa: E402
 from metrics import boundary_dice_from_sdf, dice_from_sdf, mae  # noqa: E402
 from model import UNet3D  # noqa: E402
 from profiler import Profiler, model_summary  # noqa: E402
@@ -46,72 +42,30 @@ def seed_worker(worker_id):
 
 
 # One pass over the training cases. Returns the mean loss per case.
-#
-# With a contour head (contour_coef > 0), two terms join the SDF loss:
-#   contour      MSE between the contour head and the true SDF's Gaussian contour
-#   consistency  MSE between the contour head and the contour of the predicted SDF, so
-#                the two outputs agree (Torres et al.'s segmentation-to-contour term);
-#                weighted by consistency_coef, 0 during the warm-up epochs
-#
-# With loss_mode "mask" the network is trained as an ordinary segmenter instead: its logits
-# against the head mask (the sign of the SDF target) with Dice + BCE, and no SDF terms.
-#
-# With soft_mask_coef > 0: Dice + BCE between soft masks of the predicted and the true SDF
-# (sigmoid(-d / tau), loss.py), on top of the L1 terms, which stay: they keep the output a
-# distance field; this adds a penalty on the sign right at the surface, where Dice is decided.
-def train_epoch(model, loader, optimizer, device, sw_coef: float, sw_sigma: float,
-                contour_coef: float = 0.0, consistency_coef: float = 0.0,
-                contour_sigma: float = 1.5, soft_mask_coef: float = 0.0,
-                soft_mask_tau: float = 0.5, loss_mode: str = "sdf", accum: int = 1) -> float:
+def train_epoch(model, loader, optimizer, device, sw_coef: float, sw_sigma: float) -> float:
     model.train()
     total_loss = 0.0
-    optimizer.zero_grad()
-    for i, (x, y) in enumerate(loader):
+    for x, y in loader:
         x, y = x.to(device), y.to(device)
-        if loss_mode == "mask":
-            loss = mask_dice_bce(model.logits(x), y)
-            total_loss += loss.item() * x.size(0)
-            _step(loss, optimizer, i, accum, len(loader))
-            continue
-        if contour_coef > 0:
-            pred, contour = model.forward_with_contour(x)
-        else:
-            pred = model(x)
+        pred = model(x)
 
         # L1 everywhere, plus the surface-weighted L1 (loss.py).
         loss = F.l1_loss(pred, y)
         if sw_coef > 0:
             loss = loss + sw_coef * surface_weighted_l1(pred, y, sw_sigma)
-        if contour_coef > 0:
-            loss = loss + contour_coef * F.mse_loss(contour, gaussian_contour(y, contour_sigma))
-            if consistency_coef > 0:
-                loss = loss + consistency_coef * F.mse_loss(contour, gaussian_contour(pred, contour_sigma))
-        if soft_mask_coef > 0:
-            loss = loss + soft_mask_coef * soft_mask_dice_bce(pred, y, soft_mask_tau)
 
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
         total_loss += loss.item() * x.size(0)
-        _step(loss, optimizer, i, accum, len(loader))
 
     return total_loss / len(loader.dataset)
-
-
-# Backpropagate one batch; step the optimizer every `accum` batches (and after the last).
-# With accum = 1 this is the ordinary step per batch. With accum > 1 the gradients of
-# `accum` batches are averaged before the step, which stands in for a batch `accum` times
-# larger when it does not fit in GPU memory (x2: batch 1, accum 4 for batch 4); only
-# BatchNorm still sees each batch on its own.
-def _step(loss, optimizer, i: int, accum: int, n_batches: int):
-    (loss / accum).backward()
-    if (i + 1) % accum == 0 or i + 1 == n_batches:
-        optimizer.step()
-        optimizer.zero_grad()
 
 
 # Scores on the validation cases, for the training curves only:
 # (L1 loss, MAE, Dice, boundary Dice), each averaged over cases.
 @torch.no_grad()
-def val_epoch(model, loader, device, band_mm: float,
-              loss_mode: str = "sdf") -> tuple[float, float, float, float]:
+def val_epoch(model, loader, device, band_mm: float) -> tuple[float, float, float, float]:
     model.eval()
     total_loss   = 0.0
     mae_scores   = []
@@ -120,8 +74,7 @@ def val_epoch(model, loader, device, band_mm: float,
 
     for x, y in loader:
         x, y = x.to(device), y.to(device)
-        # A mask network's probability p is scored as the field 1 - 2p, negative inside.
-        pred = model(x) if loss_mode == "sdf" else 1 - 2 * torch.sigmoid(model.logits(x))
+        pred = model(x)
         total_loss += F.l1_loss(pred, y).item() * x.size(0)
 
         # Per case within the batch. Dice is None when undefined (both masks empty).
@@ -143,8 +96,6 @@ def val_epoch(model, loader, device, band_mm: float,
 def main():
     p = argparse.ArgumentParser(description="Train the network on one fold.")
     p.add_argument("--fold",        type=int,   required=True, help="0-4, which fold is validation")
-    p.add_argument("--test-fold",   type=int,   default=None,
-                   help="a fold held out of training entirely (a test split); default none")
     p.add_argument("--n-folds",     type=int,   default=5)
     p.add_argument("--epochs",      type=int,   default=500)
     p.add_argument("--batch-size",  type=int,   default=4)
@@ -155,30 +106,12 @@ def main():
                    help="weight of the surface-weighted L1 added to the plain L1; 0 = off")
     p.add_argument("--sw-sigma",    type=float, default=1.5,
                    help="mm over which that weight decays away from the surface")
-    p.add_argument("--contour-coef", type=float, default=0.0,
-                   help="weight of the contour head's loss; 0 = no contour head")
-    p.add_argument("--contour-sigma", type=float, default=1.5,
-                   help="mm, width of the Gaussian contour map")
-    p.add_argument("--consistency-coef", type=float, default=0.0,
-                   help="weight of the SDF-to-contour consistency loss")
-    p.add_argument("--consistency-start", type=int, default=50,
-                   help="epoch from which the consistency loss is on (a warm-up without it)")
-    p.add_argument("--soft-mask-coef", type=float, default=0.0,
-                   help="weight of Dice + BCE on soft masks of the SDF; 0 = off")
-    p.add_argument("--soft-mask-tau", type=float, default=0.5,
-                   help="mm, width of the soft mask's inside-to-outside transition")
-    p.add_argument("--loss",        type=str,   default="sdf", choices=["sdf", "mask"],
-                   help="sdf: regress the SDF (L1 + surface-weighted L1, the method); mask: an "
-                        "ordinary segmenter, Dice + BCE on the head mask (the resolution study)")
     p.add_argument("--factor",      type=int,   default=FACTOR,
                    help="the grid, as a multiple of the native spacing; needs <cache>/x<factor>")
     p.add_argument("--cube",        type=int,   default=None,
                    help="training cube per axis; default 96 x 4 / factor")
     p.add_argument("--base-ch",     type=int,   default=16,
                    help="channels at the top level, doubling per level (32: 32-64-128, ~4x parameters)")
-    p.add_argument("--accum",       type=int,   default=1,
-                   help="batches whose gradients are averaged per optimizer step (x2 on a "
-                        "12 GB GPU: --batch-size 1 --accum 4 stands in for batch 4)")
     p.add_argument("--band-mm",     type=float, default=5.0,
                    help="half-width in mm of the band for the logged boundary Dice")
     p.add_argument("--inner-val",   type=int,   default=0,
@@ -196,10 +129,6 @@ def main():
     os.makedirs(run_dir, exist_ok=True)
     cube = a.cube or CUBE * FACTOR // a.factor
 
-    # What predict.py needs to rebuild the input and read the output.
-    with open(os.path.join(run_dir, "config.json"), "w") as f:
-        json.dump({"factor": a.factor, "cube": cube, "loss": a.loss, "base_ch": a.base_ch}, f)
-
     # A seed makes the run reproducible: same initial weights, same batches, same
     # augmentation, and deterministic GPU kernels.
     if a.seed is not None:
@@ -209,19 +138,14 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}  Fold: {a.fold}  Run: {run_dir}")
-    print((f"Loss: L1 + {a.sw_coef} x surface-weighted L1 @ {a.sw_sigma}mm  " if a.loss == "sdf"
-           else "Loss: Dice + BCE on the mask  ") +
+    print(f"Loss: L1 + {a.sw_coef} x surface-weighted L1 @ {a.sw_sigma}mm  "
           f"cache: {a.cache_dir}  x{a.factor} padded to {cube}^3")
 
     # Which cases train and which validate.
     ids   = case_ids(a.cache_dir)
     folds = get_folds(ids, n_folds=a.n_folds, seed=42, splits_json=a.splits_json)
     train_ids, val_ids = fold_split(folds, a.fold)
-    if a.test_fold is not None:
-        # A held-out test set (e.g. splits_60525.json): kept out of training and out of
-        # validation, which stays --fold.
-        held = set(folds[a.test_fold])
-        train_ids = [c for c in train_ids if c not in held]
+    config = {"factor": a.factor, "cube": cube, "loss": "sdf", "base_ch": a.base_ch}
     if a.inner_val:
         # The inner validation set comes out of the training cases, by patient, with a fixed
         # seed: every seed of a fold holds out the same cases, and the fold itself stays
@@ -229,11 +153,13 @@ def main():
         inner = make_folds(train_ids, n_folds=a.inner_val, seed=0)[0]
         train_ids = [c for c in train_ids if c not in set(inner)]
         val_ids = inner
-        with open(os.path.join(run_dir, "config.json"), "w") as f:
-            json.dump({"factor": a.factor, "cube": cube, "loss": a.loss, "base_ch": a.base_ch,
-                       "inner_val": inner}, f)
+        config["inner_val"] = inner
     print(f"Train: {len(train_ids)}  Val: {len(val_ids)}"
           + ("  (inner validation)" if a.inner_val else ""))
+
+    # What predict.py needs to rebuild the input and read the output.
+    with open(os.path.join(run_dir, "config.json"), "w") as f:
+        json.dump(config, f)
 
     # With a seed, the loader's shuffling and its workers' generators are seeded too.
     loader_gen  = torch.Generator().manual_seed(a.seed) if a.seed is not None else None
@@ -251,11 +177,7 @@ def main():
         pin_memory=True, generator=loader_gen, worker_init_fn=worker_init)
 
     # Adam, with the learning rate decaying along a cosine to 0 over the run.
-    model = UNet3D(in_channels=1, base_channels=a.base_ch,
-                   contour_head=a.contour_coef > 0).to(device)
-    if a.contour_coef > 0:
-        print(f"Contour head: coef {a.contour_coef}, sigma {a.contour_sigma} mm, consistency "
-              f"{a.consistency_coef} from epoch {a.consistency_start}")
+    model = UNet3D(in_channels=1, base_channels=a.base_ch).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=a.lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=a.epochs)
 
@@ -272,18 +194,15 @@ def main():
     with prof:
         for epoch in range(1, a.epochs + 1):
             with prof.span("train_epoch") as s:
-                consistency = a.consistency_coef if epoch >= a.consistency_start else 0.0
                 train_loss = train_epoch(model, train_loader, optimizer, device,
-                                         a.sw_coef, a.sw_sigma, a.contour_coef, consistency,
-                                         a.contour_sigma, a.soft_mask_coef, a.soft_mask_tau,
-                                         a.loss, a.accum)
+                                         a.sw_coef, a.sw_sigma)
                 s["items"] = len(train_loader.dataset)
 
             # Logged for the curves only; nothing is chosen from it, except with an inner
             # validation set, which keeps the epoch with its best Dice.
             with prof.span("val_epoch"):
                 val_loss, val_mae, val_dice, val_bdice = val_epoch(
-                    model, val_loader, device, band_mm=a.band_mm, loss_mode=a.loss)
+                    model, val_loader, device, band_mm=a.band_mm)
             if a.inner_val and val_dice > best_dice:
                 best_dice, best_epoch = val_dice, epoch
                 torch.save(model.state_dict(), os.path.join(checkpoint_dir, "phase1_best.pth"))

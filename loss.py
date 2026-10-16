@@ -50,8 +50,8 @@ def gaussian_contour(sdf: torch.Tensor, sigma_mm: float = 1.5, trunc_mm: float =
 # Dice + BCE on a mask output, nnU-Net's loss for a binary problem (its DC_and_BCE): the
 # network's logits against the head mask, which is the sign of the SDF target (inside where
 # it is negative). Soft Dice per sample on sigmoid(logits), averaged, plus BCE on the
-# logits. Used by the resolution study's mask arm (train.py --loss mask), against which the
-# SDF regression is compared.
+# logits. Used by the resolution study's mask arm, against which the SDF regression was
+# compared (train.py no longer has that option).
 def mask_dice_bce(logits: torch.Tensor, sdf_target: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
     target = (sdf_target < 0).float()
     p = torch.sigmoid(logits)
