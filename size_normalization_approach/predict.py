@@ -33,7 +33,6 @@ from cache import case_ids, load as load_image  # noqa: E402
 from dataset import CUBE, FACTOR  # noqa: E402
 from geometry import apply_resample, resample_grid  # noqa: E402
 from model import UNet3D  # noqa: E402
-from fine_input import FINE, load_fine, pack  # noqa: E402
 from nnunet_augmentation import pad_to_cube  # noqa: E402
 from profiler import Profiler, model_summary  # noqa: E402
 from splits import fold_split, get_folds  # noqa: E402
@@ -56,25 +55,19 @@ def native_geometry(cache_dir: str, cid: str):
 
 # Predict one case on its coarse grid and carry the field to the native grid.
 # Returns (native SDF as float32, native affine).
-@torch.no_grad()
-# A network trained with --fine-input (8 input channels) gets the 2x finer image packed
-# into channels (fine_input.py) instead of the x4 image. `factor` and `cube` are the grid
-# the network was trained on; a mask network (loss "mask") outputs logits, whose
+# `factor` and `cube` are the grid the network was trained on; a mask network (loss "mask") outputs logits, whose
 # probability p is carried as the field 1 - 2p (negative inside, like an SDF), so the
 # same resampling and threshold at 0 apply: interpolating 1 - 2p and cutting at 0 is
 # interpolating p and cutting at 0.5.
+@torch.no_grad()
 def predict_one(model, cache_dir: str, cid: str, device: torch.device,
                 factor: int = FACTOR, cube: int = CUBE, loss: str = "sdf"):
     img4, affine4 = load_image(cache_dir, cid, factor)
     native_shape, affine1 = native_geometry(cache_dir, cid)
 
     # Pad to the network's cube, predict, and cut the padding off again.
-    if model.enc1.block[0].in_channels == FINE ** 3:
-        fine = pad_to_cube(load_fine(cache_dir, cid), FINE * CUBE, cval=0.0)
-        x = torch.from_numpy(pack(fine)[np.newaxis]).float().to(device)
-    else:
-        img_padded = pad_to_cube(img4.astype(np.float32), cube, cval=0.0)
-        x = torch.from_numpy(img_padded[np.newaxis, np.newaxis]).float().to(device)
+    img_padded = pad_to_cube(img4.astype(np.float32), cube, cval=0.0)
+    x = torch.from_numpy(img_padded[np.newaxis, np.newaxis]).float().to(device)
     pred = model(x) if loss == "sdf" else 1 - 2 * torch.sigmoid(model.logits(x))
     pred = pred[:, :, :img4.shape[0], :img4.shape[1], :img4.shape[2]]
 
@@ -107,9 +100,8 @@ def main():
     # A checkpoint trained with a contour head carries its weights; the head is built so
     # the checkpoint loads, but only the SDF is predicted.
     state = torch.load(a.checkpoint, map_location=device)
-    # Input channels and width read from the checkpoint itself (first convolution).
-    model = UNet3D(in_channels=state["enc1.block.0.weight"].shape[1],
-                   base_channels=state["enc1.block.0.weight"].shape[0],
+    # Width read from the checkpoint itself (first convolution).
+    model = UNet3D(base_channels=state["enc1.block.0.weight"].shape[0],
                    contour_head="contour_head.weight" in state).to(device)
     model.load_state_dict(state)
     model.eval()

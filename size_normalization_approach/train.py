@@ -30,12 +30,11 @@ sys.path.insert(0, PARENT)
 
 from cache import case_ids  # noqa: E402
 from dataset import CUBE, FACTOR, SDFDataset  # noqa: E402
-from fine_input import FINE, FineSDFDataset  # noqa: E402
 from loss import gaussian_contour, mask_dice_bce, soft_mask_dice_bce, surface_weighted_l1  # noqa: E402
 from metrics import boundary_dice_from_sdf, dice_from_sdf, mae  # noqa: E402
 from model import UNet3D  # noqa: E402
 from profiler import Profiler, model_summary  # noqa: E402
-from splits import fold_split, get_folds  # noqa: E402
+from splits import fold_split, get_folds, make_folds  # noqa: E402
 
 
 # Each data-loader worker is a copy of the dataset, including its random generator. Without
@@ -168,9 +167,6 @@ def main():
                    help="weight of Dice + BCE on soft masks of the SDF; 0 = off")
     p.add_argument("--soft-mask-tau", type=float, default=0.5,
                    help="mm, width of the soft mask's inside-to-outside transition")
-    p.add_argument("--fine-input", action="store_true",
-                   help="feed the image at 2x detail as 8 channels (fine_input.py; needs "
-                        "<cache>/x4fine, built by python fine_input.py --cache-dir <cache>)")
     p.add_argument("--loss",        type=str,   default="sdf", choices=["sdf", "mask"],
                    help="sdf: regress the SDF (L1 + surface-weighted L1, the method); mask: an "
                         "ordinary segmenter, Dice + BCE on the head mask (the resolution study)")
@@ -185,6 +181,10 @@ def main():
                         "12 GB GPU: --batch-size 1 --accum 4 stands in for batch 4)")
     p.add_argument("--band-mm",     type=float, default=5.0,
                    help="half-width in mm of the band for the logged boundary Dice")
+    p.add_argument("--inner-val",   type=int,   default=0,
+                   help="N > 0: hold out 1/N of the training cases (patient-grouped, the same for "
+                        "every seed) as an inner validation set, validate on it instead of the "
+                        "fold, and also save the epoch with its best Dice as phase1_best.pth")
     p.add_argument("--seed",        type=int,   default=None)
     p.add_argument("--cache-dir",   type=str,   default=os.path.join(PARENT, "caches", "cache_norm4"))
     p.add_argument("--splits-json", type=str,   default=os.path.join(PARENT, "splits.json"))
@@ -222,7 +222,18 @@ def main():
         # validation, which stays --fold.
         held = set(folds[a.test_fold])
         train_ids = [c for c in train_ids if c not in held]
-    print(f"Train: {len(train_ids)}  Val: {len(val_ids)}")
+    if a.inner_val:
+        # The inner validation set comes out of the training cases, by patient, with a fixed
+        # seed: every seed of a fold holds out the same cases, and the fold itself stays
+        # unseen, so the best epoch is chosen without looking at what gets reported.
+        inner = make_folds(train_ids, n_folds=a.inner_val, seed=0)[0]
+        train_ids = [c for c in train_ids if c not in set(inner)]
+        val_ids = inner
+        with open(os.path.join(run_dir, "config.json"), "w") as f:
+            json.dump({"factor": a.factor, "cube": cube, "loss": a.loss, "base_ch": a.base_ch,
+                       "inner_val": inner}, f)
+    print(f"Train: {len(train_ids)}  Val: {len(val_ids)}"
+          + ("  (inner validation)" if a.inner_val else ""))
 
     # With a seed, the loader's shuffling and its workers' generators are seeded too.
     loader_gen  = torch.Generator().manual_seed(a.seed) if a.seed is not None else None
@@ -231,18 +242,16 @@ def main():
     worker_init = seed_worker
 
     train_loader = DataLoader(
-        FineSDFDataset(a.cache_dir, train_ids, augment=True, seed=a.seed) if a.fine_input else
         SDFDataset(a.cache_dir, train_ids, augment=True, seed=a.seed, factor=a.factor, cube=cube),
         batch_size=a.batch_size, shuffle=True, num_workers=a.workers,
         pin_memory=True, generator=loader_gen, worker_init_fn=worker_init)
     val_loader = DataLoader(
-        FineSDFDataset(a.cache_dir, val_ids, augment=False, seed=a.seed) if a.fine_input else
         SDFDataset(a.cache_dir, val_ids, augment=False, seed=a.seed, factor=a.factor, cube=cube),
         batch_size=a.batch_size, shuffle=False, num_workers=a.workers,
         pin_memory=True, generator=loader_gen, worker_init_fn=worker_init)
 
     # Adam, with the learning rate decaying along a cosine to 0 over the run.
-    model = UNet3D(in_channels=FINE ** 3 if a.fine_input else 1, base_channels=a.base_ch,
+    model = UNet3D(in_channels=1, base_channels=a.base_ch,
                    contour_head=a.contour_coef > 0).to(device)
     if a.contour_coef > 0:
         print(f"Contour head: coef {a.contour_coef}, sigma {a.contour_sigma} mm, consistency "
@@ -259,6 +268,7 @@ def main():
     prof = Profiler("train")
     print(f"Model: {model_summary(model)}")
 
+    best_dice, best_epoch = -1.0, 0
     with prof:
         for epoch in range(1, a.epochs + 1):
             with prof.span("train_epoch") as s:
@@ -269,10 +279,14 @@ def main():
                                          a.loss, a.accum)
                 s["items"] = len(train_loader.dataset)
 
-            # Logged for the curves only; nothing is chosen from it.
+            # Logged for the curves only; nothing is chosen from it, except with an inner
+            # validation set, which keeps the epoch with its best Dice.
             with prof.span("val_epoch"):
                 val_loss, val_mae, val_dice, val_bdice = val_epoch(
                     model, val_loader, device, band_mm=a.band_mm, loss_mode=a.loss)
+            if a.inner_val and val_dice > best_dice:
+                best_dice, best_epoch = val_dice, epoch
+                torch.save(model.state_dict(), os.path.join(checkpoint_dir, "phase1_best.pth"))
 
             scheduler.step()
 
@@ -284,6 +298,10 @@ def main():
                         f"{val_bdice:.4f}\n")
 
     torch.save(model.state_dict(), os.path.join(checkpoint_dir, "phase1_last.pth"))
+    if a.inner_val:
+        with open(os.path.join(run_dir, "best_epoch.json"), "w") as f:
+            json.dump({"epoch": best_epoch, "inner_val_dice": best_dice}, f)
+        print(f"\nBest inner-validation epoch: {best_epoch} (Dice {best_dice:.4f})")
     print(f"\nCheckpoint : {checkpoint_dir}")
     print(f"Log        : {log_path}")
 
