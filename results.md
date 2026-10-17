@@ -12,6 +12,12 @@ Everything since the folds were regrouped by patient (commit `5f3bc7d`). The old
   **per-case mean over 3 seeds** (42, 43, 44). A method is compared on the same 90 cases with
   a paired Wilcoxon test; one seed is never enough to conclude (seed-to-seed spread is
   ~0.002 Dice).
+- The last epoch is not worse than the best one. Size-normalised x4, 3 seeds × 5 folds,
+  each trained with 1/5 of its training cases held out by patient (`train.py --inner-val 5`)
+  to choose the epoch with the best Dice; both scored on the outer fold: best 0.9426 / 3.53 /
+  1.127, last 0.9430 / 3.51 / 1.118 (Dice −0.0004, p = 0.34, best better on 43/90). The
+  chosen epoch ranged from 245 to 415, and the gap per run from −0.0069 to +0.0021
+  (`size_normalization_approach/runs/bestepoch_x4norm_s*`).
 - nnU-Net: `3d_fullres`, final checkpoint, 250 and 1000 epochs.
 
 ## The method
@@ -70,8 +76,8 @@ consistently and fixes the small heads that used to fail at x8.
 ## Size normalisation: is the estimated volume good enough?
 
 **Cross-validation** (90 cases, one model, 3 seeds): normalising the test head with the
-volume pass 1 estimates gives 0.9462; with the true volume (oracle) 0.9468. The pass-1
-volume error is 1.4% median, ~6% at worst.
+volume pass 1 estimates gives 0.9462; with the true volume (oracle) 0.9468. Pass 1's
+volume error is 4.3% median (20% at worst); the error of the scale k it gives is 1.4%.
 
 **Held-out split** `splits_60525.json`: 60 train / 5 val / 25 test, patient-grouped,
 stratified by head size, 3 seeds per arm. Test normalised with the estimated volume:
