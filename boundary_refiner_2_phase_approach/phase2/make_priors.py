@@ -15,7 +15,7 @@
 #     --cache-dir "caches/cache_norm4_est_s{s}" --out-dir boundary_refiner_2_phase_approach/priors/x4norm_ens_tta
 #
 # Each file holds the predicted SDF at native resolution (sdf) and the native affine
-# (affine), the format make_crops.py and size_normalization_approach/evaluate.py read.
+# (affine), the format make_crops.py and size_normalization_approach/evaluation/evaluate.py read.
 #
 # Out-of-fold: every case is predicted by the network of the fold where it was
 # validation, so no prior comes from a network that trained on that case. Phase 2 then
@@ -38,10 +38,9 @@ ROOT = os.path.dirname(APPROACH)
 sys.path.insert(0, ROOT)
 
 from cache import case_ids, load as load_image  # noqa: E402
-from geometry import apply_resample, resample_grid  # noqa: E402
+from geometry import CUBE, FACTOR, apply_resample, resample_grid  # noqa: E402
 from model import UNet3D  # noqa: E402
 from nnunet_augmentation import pad_to_cube  # noqa: E402
-from sdf_dataset import CUBE, FACTOR  # noqa: E402
 from splits import fold_split, get_folds  # noqa: E402
 
 

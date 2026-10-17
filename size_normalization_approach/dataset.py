@@ -16,11 +16,9 @@ from torch.utils.data import Dataset
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from cache import load as load_image  # noqa: E402
+from geometry import CUBE, FACTOR  # noqa: E402
 from make_sdf import load as load_sdf, load_mm as load_sdf_mm  # noqa: E402
 from nnunet_augmentation import augment_nnunet, pad_to_cube  # noqa: E402
-
-FACTOR = 4        # the x4 grid (1.6 mm before size normalisation)
-CUBE = 96         # network input per axis: a multiple of 8 (three poolings) fitting every case
 
 
 # (image, SDF) pairs from cache_dir/x4 and cache_dir/sdf/x4 (or sdf/x4mm when augmenting),
@@ -59,9 +57,9 @@ class SDFDataset(Dataset):
             # Pad the image with 0 and the SDF with +1 (outside; 0 would put a fake surface
             # along the padding). 0 is the z-scored volume's mean, not its background: about
             # half of each x4 volume is background, at -0.6 to -0.8, so the padding (like
-            # the rotation fill in nnunet_augmentation) makes a step edge. Training,
-            # predict.py and bench_pipeline.py all pad with 0, so they agree; changing it
-            # would mean retraining.
+            # the rotation fill in nnunet_augmentation) makes a step edge. Training and
+            # inference (infer.py) both pad with 0, so they agree; changing it would mean
+            # retraining.
             img = pad_to_cube(img, self.cube, cval=0.0)
             sdf = pad_to_cube(sdf.astype(np.float32), self.cube, cval=1.0)
 

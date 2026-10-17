@@ -2,7 +2,6 @@
 # apparent size.
 #
 #     python size_norm.py                                    # training copy -> caches/cache_norm4/
-#     python size_norm.py --volumes est.json --dst caches/cache_norm4_est --reference caches/cache_norm4
 #
 # Head volumes in the dataset range from 35 to 291 mL, so a network on a fixed grid has to
 # handle very different sizes, and the smallest heads are rare. Here each case gets its
@@ -14,13 +13,15 @@
 # rather than fewer of them.
 #
 # V0, the canonical size, is the median head volume of the training data: computed here
-# from the labels when the training copy is built, and stored in its norm.json. Every
-# later use (the estimated-volume copies, deployment) reads it from there (--reference),
-# so it comes from the data and training and inference cannot disagree. --v0-ml
-# overrides it; the existing caches were built with 130 mL (the median, 128.3, rounded).
+# from the labels when the training copy is built, and stored in its norm.json.
+# Inference reads it from there (reference_v0), so it comes from the data and training
+# and inference cannot disagree. --v0-ml overrides it; the existing cache was built with
+# 130 mL (the median, 128.3, rounded).
 #
-# Train on the copy built from the true volumes (from the labels). For evaluation and
-# deployment, the volume comes from a first pass of the plain x4 network (--volumes).
+# This builds the training copy, from the true volumes (the labels). Evaluation and
+# deployment never use a normalised cache: size_normalization_approach/infer.py
+# normalises each native image on the GPU with the volume a first pass of the plain x4
+# network estimates.
 #
 # Output layout, same as caches/cache/ so the other scripts read it unchanged:
 #     x4/, sdf/x4/, sdf/x4mm/   the normalised image and targets, each with its own affine
@@ -32,7 +33,7 @@
 # enlarging a small head enlarges its whole scan. A case that would exceed 96 is
 # coarsened just enough to fit (its head ends a little below the canonical size) rather
 # than cropped. It never ends coarser than plain x4, which fits every scan. In this
-# dataset it applied once, by 1%. Deployment (scripts/bench_pipeline.py) does not cap: it
+# dataset it applied once, by 1%. Inference (infer.py) does not cap: it
 # pads a larger grid to a multiple of 8 instead, which keeps the canonical size (on a scan
 # 17% too large, the cap cost 0.028 Dice).
 
@@ -53,9 +54,10 @@ from cache import case_ids, load, load_label  # noqa: E402
 from geometry import downsample  # noqa: E402
 from make_sdf import signed_distance_mm  # noqa: E402
 
-TRUNC_MM = 10.0    # SDF truncation, as in make_sdf.py
-FACTOR = 4         # the grid normalised: x4 (--factor: 8 and 2 for the resolution study)
-CUBE = 96          # the network's input size per axis at x4; scales as 4 / factor
+# The grid normalised is x4 in a 96^3 cube (--factor: 8 and 2 for the resolution study;
+# the cube scales as 4 / factor).
+from geometry import CUBE, FACTOR  # noqa: E402
+from make_sdf import TRUNC_MM  # noqa: E402
 
 
 # Link a folder of caches/cache/ into the new cache instead of copying it. On Windows a junction,
@@ -98,10 +100,6 @@ def main():
     p = argparse.ArgumentParser(description="Build a size-normalised copy of the x4 cache.")
     p.add_argument("--src", default=os.path.join(HERE, "caches", "cache"))
     p.add_argument("--dst", default=os.path.join(HERE, "caches", "cache_norm4"))
-    p.add_argument("--volumes", default=None,
-                   help="JSON {case: mL} of estimated volumes; default: the label's")
-    p.add_argument("--reference", default=None,
-                   help="the training cache whose V0 to use (required with --volumes)")
     p.add_argument("--v0-ml", type=float, default=None,
                    help="override V0; default: the median head volume of the labels")
     p.add_argument("--factor", type=int, default=FACTOR,
@@ -113,20 +111,10 @@ def main():
     base = a.factor
     cube = a.cube or CUBE * FACTOR // a.factor
 
-    estimates = json.load(open(a.volumes)) if a.volumes else None
     ids = case_ids(a.src)[:a.limit or None]
 
-    # The canonical volume V0: given, or the training cache's, or (building a training
-    # cache) the median of the label volumes. An estimated-volume cache must use its
-    # training cache's V0, never one of its own.
-    if a.v0_ml is not None:
-        v0 = a.v0_ml
-    elif a.reference:
-        v0 = reference_v0(a.reference)
-    elif estimates is None:
-        v0 = float(np.median([label_volume_ml(a.src, cid) for cid in ids]))
-    else:
-        p.error("--volumes needs --reference <training cache> (or --v0-ml)")
+    # The canonical volume V0: given, or the median of the label volumes.
+    v0 = a.v0_ml if a.v0_ml is not None else float(np.median([label_volume_ml(a.src, cid) for cid in ids]))
     print(f"V0 = {v0:.1f} mL", flush=True)
 
     xf = f"x{base}"
@@ -144,11 +132,9 @@ def main():
         label = (label[0] if label.ndim == 4 else label).astype(bool)
         spacing = np.abs(np.diag(affine[:3, :3]))
 
-        # Head volume in mL: from the label, or the estimate when one is given.
+        # Head volume in mL, from the label.
         true_ml = label.sum() * np.prod(spacing) / 1000
-        # `is not None`: an empty estimates file must fail on the missing case, not fall
-        # back silently to the true volume.
-        vol_ml = float(estimates[cid]) if estimates is not None else true_ml
+        vol_ml = float(true_ml)
 
         # The linear scale between this head and the canonical one, and the resulting
         # resampling factor relative to the native spacing.
@@ -180,7 +166,7 @@ def main():
               f"{time.time() - t0:4.1f}s", flush=True)
 
     with open(os.path.join(a.dst, "norm.json"), "w") as f:
-        json.dump({"v0_ml": v0, "oracle": estimates is None, "factor": base, "cube": cube,
+        json.dump({"v0_ml": v0, "oracle": True, "factor": base, "cube": cube,
                    "cases": meta}, f, indent=1)
     shapes = np.array([m["shape"] for m in meta.values()])
     print(f"\nlargest shape per axis {shapes.max(0)} (cube {cube})")

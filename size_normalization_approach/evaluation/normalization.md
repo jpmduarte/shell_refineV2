@@ -1,7 +1,7 @@
 # Does size normalisation help, and where?
 
 The size-normalised x4 method beats plain x4 by +0.0015 Dice in cross-validation (p = 0.055,
-3 seeds, [../results.md](../results.md)) — a small average gain. Two tests ask where it
+3 seeds, [../../results.md](../../results.md)) — a small average gain. Two tests ask where it
 comes from: a synthetic one that rescales the heads, and one on the dataset's real spread
 of head sizes. They agree on small heads and disagree on large ones, and the real-size test
 is the one to trust where they differ.
@@ -12,8 +12,8 @@ is the one to trust where they differ.
 case averaged over the 3 seeds (each case scored by the fold that held it out), grouped by
 the label's head volume (35–291 mL, V0 = 130 mL). Paired Wilcoxon within each group.
 
-    python size_normalization_approach/size_by_volume.py              # terciles
-    python size_normalization_approach/size_by_volume.py --groups 5   # quintiles
+    python size_normalization_approach/evaluation/size_by_volume.py              # terciles
+    python size_normalization_approach/evaluation/size_by_volume.py --groups 5   # quintiles
 
 **By head volume (terciles, 30 cases each)**
 

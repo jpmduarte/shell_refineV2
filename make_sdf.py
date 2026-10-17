@@ -25,6 +25,8 @@ warnings.filterwarnings("ignore", category=UserWarning)
 from monai.data import MetaTensor  # noqa: E402
 
 from cache import FACTORS, case_ids, load_label  # noqa: E402
+
+TRUNC_MM = 10.0   # the SDF's truncation: +-10 mm maps to +-1
 from geometry import downsample  # noqa: E402
 
 
@@ -50,7 +52,7 @@ def save(path, sdf, affine):
 
 
 # The normalised SDF at every cached resolution: caches/cache/sdf/x<f>/<case>.npz.
-def build(cache_dir, out_dir, factors=FACTORS, truncation_mm=10.0, limit=0):
+def build(cache_dir, out_dir, factors=FACTORS, truncation_mm=TRUNC_MM, limit=0):
     ids = case_ids(cache_dir)
     if limit:
         ids = ids[:limit]
@@ -125,7 +127,7 @@ if __name__ == "__main__":
     p.add_argument("--cache-dir", default=os.path.join(here, "caches", "cache"))
     p.add_argument("--out-dir", default=os.path.join(here, "caches", "cache", "sdf"))
     p.add_argument("--factors", type=int, nargs="+", default=list(FACTORS))
-    p.add_argument("--truncation-mm", type=float, default=10.0)
+    p.add_argument("--truncation-mm", type=float, default=TRUNC_MM)
     p.add_argument("--limit", type=int, default=0, help="only the first N cases (testing)")
     p.add_argument("--untruncated", action="store_true",
                    help="write the untruncated mm field at x4 to cache/sdf/x4mm instead")

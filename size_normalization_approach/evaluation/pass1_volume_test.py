@@ -1,6 +1,6 @@
 # Better head volumes for the size normalisation: does a better estimate improve the result?
 #
-#     python size_normalization_approach/pass1_volume_test.py
+#     python size_normalization_approach/evaluation/pass1_volume_test.py
 #
 # The normalised network sees each head at the reference size V0, using the head volume
 # estimated by pass 1 (one pass of the plain x4 network). Here the volume fed to pass 2 is
@@ -25,25 +25,18 @@ import numpy as np
 import torch
 
 HERE   = os.path.dirname(os.path.abspath(__file__))
-PARENT = os.path.dirname(HERE)
-sys.path.insert(0, PARENT)
-sys.path.insert(0, os.path.join(PARENT, "scripts"))
+SNA    = os.path.dirname(HERE)          # size_normalization_approach/: the method, its runs
+ROOT   = os.path.dirname(SNA)
+sys.path[:0] = [ROOT, SNA]
 
-from bench_pipeline import forward, to_grid_fast, to_native_fast  # noqa: E402
 from cache import case_ids, load as load_image, load_label  # noqa: E402
+from infer import forward, load_net, to_grid_fast, to_native_fast, volume_ml, zscore  # noqa: E402
 from metrics import hd95  # noqa: E402
-from model import UNet3D  # noqa: E402
 from size_norm import reference_v0  # noqa: E402
 from splits import fold_split, get_folds  # noqa: E402
 
 SEEDS = (42, 43, 44)
 VARIANTS = ("single", "tta", "ens_tta", "iter1", "iter2", "ens_iter1", "oracle")
-
-
-# Head volume (mL) of an SDF on a grid of voxel size `spacing` mm: voxels inside, times the
-# voxel volume.
-def volume_ml(field: torch.Tensor, spacing: float) -> float:
-    return float((field < 0).sum()) * spacing ** 3 / 1000
 
 
 # Pass 2 for a given head volume: native image -> grid that brings the head to V0 -> network
@@ -63,26 +56,24 @@ def dice(a: np.ndarray, b: np.ndarray) -> float:
 
 def main():
     p = argparse.ArgumentParser(description="Pass-1 volume variants for the size normalisation.")
-    p.add_argument("--cache-dir", default=os.path.join(PARENT, "caches", "cache"))
-    p.add_argument("--reference", default=os.path.join(PARENT, "caches", "cache_norm4"))
-    p.add_argument("--out", default=os.path.join(HERE, "runs", "pass1_volume_test.json"))
+    p.add_argument("--cache-dir", default=os.path.join(ROOT, "caches", "cache"))
+    p.add_argument("--reference", default=os.path.join(ROOT, "caches", "cache_norm4"))
+    p.add_argument("--out", default=os.path.join(SNA, "runs", "pass1_volume_test.json"))
     a = p.parse_args()
 
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     v0_ml = reference_v0(a.reference)
     folds = get_folds(case_ids(a.cache_dir), n_folds=5, seed=42,
-                      splits_json=os.path.join(PARENT, "splits.json"))
+                      splits_json=os.path.join(ROOT, "splits.json"))
 
-    def load_net(run, seed, fold):
-        net = UNet3D().to(dev).eval().requires_grad_(False)
-        path = os.path.join(HERE, "runs", f"{run}_s{seed}", f"fold{fold}", "checkpoints", "phase1_last.pth")
-        net.load_state_dict(torch.load(path, map_location=dev))
-        return net
+    def net(run, seed, fold):
+        return load_net(os.path.join(SNA, "runs", f"{run}_s{seed}", f"fold{fold}", "checkpoints",
+                                     "phase1_last.pth"), dev)[0]
 
     rows = []
     for fold in range(5):
-        pass1 = {s: load_net("nnaug_x4e500", s, fold) for s in SEEDS}
-        norm = {s: load_net("nnaug_x4norm", s, fold) for s in SEEDS}
+        pass1 = {s: net("nnaug_x4e500", s, fold) for s in SEEDS}
+        norm = {s: net("nnaug_x4norm", s, fold) for s in SEEDS}
         for cid in fold_split(folds, fold)[1]:
             img1, aff1 = load_image(a.cache_dir, cid, 1)
             lab = np.asarray(load_label(a.cache_dir, cid)[0]).squeeze().astype(bool)
@@ -90,8 +81,7 @@ def main():
             native_spacing = float(sp_mm[0])
             true_ml = float(lab.sum()) * native_spacing ** 3 / 1000
 
-            x1 = torch.from_numpy(np.asarray(img1, np.float32).squeeze()).to(dev)
-            x1 = (x1 - x1.mean()) / x1.std()
+            x1 = zscore(np.asarray(img1).squeeze(), dev)
             x4, _ = to_grid_fast(x1, aff1, 4 * native_spacing)
             vox4 = 4 * native_spacing
             with torch.no_grad():

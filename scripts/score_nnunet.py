@@ -8,7 +8,7 @@
 # under its own case numbers. Each prediction is loaded and reoriented to RAS exactly as
 # cache.py treats labels, renamed to our case id through case_map.json, checked to lie on
 # the same grid as the cached label, and then scored with metrics.py, as
-# size_normalization_approach/evaluate.py scores ours.
+# size_normalization_approach/evaluation/evaluate.py scores ours.
 
 import argparse
 import glob

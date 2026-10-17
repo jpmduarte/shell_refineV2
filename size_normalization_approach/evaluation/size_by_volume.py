@@ -1,6 +1,6 @@
 # Real head-size test: does size normalisation help most on heads far from the median?
 #
-#     python size_normalization_approach/size_by_volume.py
+#     python size_normalization_approach/evaluation/size_by_volume.py
 #
 # No resampling, unlike size_shift_test.py: the dataset's own spread of head sizes (35-291
 # mL) and the cross-validation results already on disk. Per case, the Dice / HD95 / ASD of
@@ -20,7 +20,8 @@ import numpy as np
 from scipy.stats import spearmanr, wilcoxon
 
 HERE   = os.path.dirname(os.path.abspath(__file__))
-PARENT = os.path.dirname(HERE)
+SNA    = os.path.dirname(HERE)          # size_normalization_approach/: the method, its runs
+ROOT   = os.path.dirname(SNA)
 SEEDS  = (42, 43, 44)
 METRICS = ("dice_label", "hd95", "asd")
 
@@ -30,7 +31,7 @@ def per_case(run: str) -> dict:
     acc = {}
     for s in SEEDS:
         for k in range(5):
-            path = os.path.join(HERE, "runs", f"{run}_s{s}", f"fold{k}", "eval_val", "summary.json")
+            path = os.path.join(SNA, "runs", f"{run}_s{s}", f"fold{k}", "eval_val", "summary.json")
             for c in json.load(open(path))["cases"]:
                 acc.setdefault(c["case"], []).append([c[m] for m in METRICS])
     return {cid: dict(zip(METRICS, np.mean(v, axis=0))) for cid, v in acc.items()}
@@ -60,7 +61,7 @@ def main():
     a = p.parse_args()
 
     plain, norm = per_case(a.plain), per_case(a.norm)
-    meta = json.load(open(os.path.join(PARENT, "caches", "cache_norm4", "norm.json")))
+    meta = json.load(open(os.path.join(ROOT, "caches", "cache_norm4", "norm.json")))
     v0 = float(meta["v0_ml"])
     vol = {c: m["true_ml"] for c, m in meta["cases"].items()}
     ids = sorted(set(plain) & set(norm) & set(vol))

@@ -6,11 +6,11 @@
 # interpolate there.
 #
 #   downsample                      builds the caches (MONAI's Spacingd)
-#   resample_grid + apply_resample  carry a prediction back to native
-#                                   (size_normalization_approach/predict.py)
+#   resample_grid + apply_resample  the same map as an explicit per-voxel grid (the
+#                                   slower "geometry" resampler of infer.py)
 #   spacing_grid + affine_resample  both directions at inference, on the GPU
-#                                   (scripts/bench_pipeline.py): the same voxels as the
-#                                   two above, at a fraction of the cost
+#                                   (size_normalization_approach/infer.py): the same
+#                                   voxels as the two above, at a fraction of the cost
 #
 # About `cval`: grid_sample has no "fill with a constant" mode, only "repeat the border".
 # So the constant is subtracted before sampling and added back after. An SDF needs +1
@@ -21,6 +21,10 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from monai.transforms import Spacingd
+
+# The network's grid, defined once here for every script.
+FACTOR = 4        # the x4 grid: 4 x the native spacing (1.6 mm before size normalisation)
+CUBE = 96         # network input per axis: a multiple of 8 (three poolings) fitting every case
 
 
 # Resample item[key] to `factor` times its current spacing (factor 4: 0.4 mm -> 1.6 mm).

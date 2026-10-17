@@ -27,8 +27,9 @@ import torch
 import torch.nn.functional as F
 from scipy.ndimage import gaussian_filter, map_coordinates
 
-TRUNC_MM = 10.0   # the SDF's truncation (make_sdf.py)
-FAR_MM = 1e3      # SDF value used outside the scan: far outside, so +1 once truncated
+from make_sdf import TRUNC_MM  # noqa: E402,F401  (the SDF's truncation; re-exported)
+
+FAR_MM = 1e3     # SDF value used outside the scan: far outside, so +1 once truncated
 
 
 # Pad a volume at the far end of each axis up to cube^3, with a constant.

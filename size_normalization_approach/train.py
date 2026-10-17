@@ -25,7 +25,8 @@ PARENT = os.path.dirname(HERE)
 sys.path.insert(0, PARENT)
 
 from cache import case_ids  # noqa: E402
-from dataset import CUBE, FACTOR, SDFDataset  # noqa: E402
+from dataset import SDFDataset  # noqa: E402
+from geometry import CUBE, FACTOR  # noqa: E402
 from loss import surface_weighted_l1  # noqa: E402
 from metrics import boundary_dice_from_sdf, dice_from_sdf, mae  # noqa: E402
 from model import UNet3D  # noqa: E402

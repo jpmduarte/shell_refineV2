@@ -1,6 +1,6 @@
 # Scores the predictions saved by predict.py, at native resolution. It runs no model.
 #
-#     python size_normalization_approach/evaluate.py --pred-dir <run>/fold0/preds_val --cache-dir <cache> \
+#     python size_normalization_approach/evaluation/evaluate.py --pred-dir <run>/fold0/preds_val --cache-dir <cache> \
 #         --out-dir <run>/fold0/eval_val
 #
 # Two comparisons per case:
@@ -20,8 +20,9 @@ import numpy as np
 import torch
 
 HERE   = os.path.dirname(os.path.abspath(__file__))
-PARENT = os.path.dirname(HERE)
-sys.path.insert(0, PARENT)
+SNA    = os.path.dirname(HERE)          # size_normalization_approach/: the method, its runs
+ROOT   = os.path.dirname(SNA)
+sys.path[:0] = [ROOT, SNA]
 
 from cache import load_label  # noqa: E402
 from make_sdf import load as load_sdf_target  # noqa: E402
@@ -70,7 +71,7 @@ def print_and_write(line: str, f):
 def main():
     p = argparse.ArgumentParser(description="Score saved predictions against the labels.")
     p.add_argument("--pred-dir",  type=str, required=True, help="predict.py's output folder")
-    p.add_argument("--cache-dir", type=str, default=os.path.join(PARENT, "caches", "cache"))
+    p.add_argument("--cache-dir", type=str, default=os.path.join(ROOT, "caches", "cache"))
     p.add_argument("--out-dir",   type=str, required=True)
     a = p.parse_args()
 

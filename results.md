@@ -18,6 +18,12 @@ Everything since the folds were regrouped by patient (commit `5f3bc7d`). The old
   1.127, last 0.9430 / 3.51 / 1.118 (Dice −0.0004, p = 0.34, best better on 43/90). The
   chosen epoch ranged from 245 to 415, and the gap per run from −0.0069 to +0.0021
   (`size_normalization_approach/runs/bestepoch_x4norm_s*`).
+- Evaluation runs the method as deployed (`size_normalization_approach/infer.py`, through
+  `predict.py`): from the native image, with pass 1's volume. The size-normalised numbers
+  below were first computed from estimated-volume caches; re-run through `infer.py`, all
+  90 cases × 3 seeds give the same means (one model: Dice 0.9462, HD95 3.17, ASD 1.059
+  against 1.060). Per case they differ by up to 0.012 Dice, because the caches measured
+  pass 1's volume slightly differently (median 0.1%) and shrank one scan to fit 96³.
 - nnU-Net: `3d_fullres`, final checkpoint, 250 and 1000 epochs.
 
 ## The method
@@ -109,7 +115,8 @@ base channels (5.6 M params): 0.9433 against 0.9437 on seed 42 fold 0, then canc
 Same network and recipe; only the grid (`--factor`) and the target (`--loss sdf|mask`)
 change. The mask arm is Dice + BCE on the head mask (nnU-Net's binary loss); its
 probability is carried to the native grid and cut at 0.5. Paired Wilcoxon against x4 SDF.
-Inference on all 90 cases, 3 repeats (`bench_pipeline.py --pass2-factor`).
+Inference on all 90 cases, 3 repeats (`bench_pipeline.py --pass2 <the arm's runs>`; the grid
+comes from each run's config.json).
 
 | Grid | Loss | Dice | Dice + TTA | HD95 | ASD | ms, one model / + TTA |
 |---|---|---|---|---|---|---|
@@ -215,8 +222,8 @@ slower on this machine), so it could get faster. nnU-Net keeps the GPU saturated
 ## Reproduce
 
 ```
-python scripts/bench_pipeline.py --fold 0                      # ours, inference
-python scripts/bench_pipeline.py --fold 0 --resampler geometry
+python scripts/bench_pipeline.py --folds 0                     # ours, inference
+python scripts/bench_pipeline.py --folds 0 --resampler geometry
 conda activate nnunet-bench
 python scripts/bench_nnunet.py --fold 0                        # nnU-Net, inference
 python scripts/profile_run.py --out prof.json -- <training command>

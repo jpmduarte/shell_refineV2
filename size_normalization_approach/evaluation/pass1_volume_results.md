@@ -6,7 +6,7 @@ and by 8–13% (underestimates) on three of the ten worst cases, where the norma
 did worse than plain x4. Two cheap fixes, both inference only, were tested with
 [pass1_volume_test.py](pass1_volume_test.py):
 
-    python size_normalization_approach/pass1_volume_test.py
+    python size_normalization_approach/evaluation/pass1_volume_test.py
 
 1. **A better pass 1:** its 8 mirrorings averaged (TTA), or the 3 seeds' pass 1 with TTA
    averaged (an ensemble; all networks of the same fold, so no leak).
@@ -53,9 +53,9 @@ The deployed row reproduces the cross-validation result (0.9462).
 ## What changed in the pipeline
 
 None of the variants is adopted. What the size-shift test showed is needed is a guard:
-[scripts/bench_pipeline.py](../scripts/bench_pipeline.py) `run_case` now uses pass 1's scale
-only within `k_range` (0.5–2, a head of about 16–1040 mL); outside it, including a pass 1
-that finds no head, it returns pass 1's own segmentation instead of failing. It changes
-nothing on the 90 cases (every k lies in 0.65–1.27) and was checked on a normal case
-(unchanged), a forced out-of-range case (exactly pass 1's result) and an empty volume (no
-crash).
+[infer.py](../infer.py) `segment` (the pipeline every script runs) uses pass 1's scale only
+within `k_range` (0.5–2, a head of about 16–1040 mL); outside it, including a pass 1 that
+finds no head, it returns pass 1's own segmentation instead of failing. It changes nothing
+on the 90 cases (every k lies in 0.65–1.27). The three checks (a normal case unchanged, a
+forced out-of-range case exactly pass 1's result, an empty volume without a crash) are
+`tests/test_method.py` `Guard`.

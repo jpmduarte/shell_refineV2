@@ -5,7 +5,7 @@ resampled so the head spans s times more voxels at the same 0.4 mm voxel, as if 
 were bigger or smaller, and both methods run exactly as deployed. Produced by
 [size_shift_test.py](size_shift_test.py), once per fold and seed:
 
-    python size_normalization_approach/size_shift_test.py --fold <0-4> --seed <42|43|44>
+    python size_normalization_approach/evaluation/size_shift_test.py --fold <0-4> --seed <42|43|44>
 
 All 5 folds × 3 seeds: every case is predicted by the networks of the fold that held it
 out. Dice at native resolution against the label resampled the same way (through its SDF),
@@ -26,7 +26,7 @@ finds no head, the method falls back to pass 1's own segmentation (the plain x4 
 | 1.50 (×3.38) | 433 mL | 0.9254 | **0.9457** | **+0.0203** | 3e-12 | 76/90 | 0 | 6.6% (−0.9%) | 1.01–1.89 |
 
 At the original size the two columns are exactly the main results' one-model figures
-(0.9447 and 0.9462, [../results.md](../results.md)), which checks the test end to end. The
+(0.9447 and 0.9462, [../../results.md](../../results.md)), which checks the test end to end. The
 three seeds agree at every scale (normalised − plain, by seed: +0.042 to +0.044 at 0.6×,
 0.000 to +0.003 at 1.0×, +0.018 to +0.024 at 1.5×).
 
@@ -64,7 +64,7 @@ prevents.
 - The volume error here is on the volume itself (4.3% median at the original size). The
   1.4% quoted in results.md and docs/pipeline.md is the error of the linear scale k, not of
   the volume.
-- The deployed pipeline (scripts/bench_pipeline.py `run_case`) now has the same guard:
+- The pipeline itself ([infer.py](../infer.py) `segment`) now has the same guard:
   outside 0.5 ≤ k ≤ 2 it returns pass 1's segmentation (see pass1_volume_results.md).
 - The geometry assumes the cache's: RAS, isotropic 0.4 mm voxels. The volume scales as s³
   as intended (median 128 mL × s³ matches the measured medians at every scale).
