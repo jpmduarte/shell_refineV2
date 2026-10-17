@@ -66,6 +66,49 @@ and the normalised method then makes the speckle finer than in training. This is
 synthetic test shows a gain for large heads (+0.008 at 1.3×, +0.020 at 1.5×) that the real
 heads do not (−0.0000 for 141–291 mL). For small heads the two tests agree.
 
+## 3. The closest precedent: Cellpose
+
+Cellpose (Stringer et al.; code at github.com/MouseLand/cellpose, read at tag `v3.1.1.3`
+and at `main`, commit `a54cb48`, June 2026) normalises object size for cell
+segmentation. It is the precedent to cite, and its two versions take opposite sides of the
+question this method raises.
+
+| | Cellpose 3 | Cellpose 4 (Cellpose-SAM) | This method |
+|---|---|---|---|
+| size at inference | estimated, two passes (`SizeModel`) | not estimated; `diameter` optional, by hand | estimated, two passes |
+| pass 1 | the network's style vector → linear regression → diameter | — | the plain x4 network's mask → head volume |
+| refinement | a second run at that scale; the final diameter is measured on its masks | — | one estimate; iterating made it worse (pass1_volume_results.md) |
+| size measure | median over cells of √area / (√π / 2): the diameter of the circle with the same area | — | V^(1/3) of the one head |
+| canonical size | 30 px (`diam_mean`) | 30 px, only if a diameter is given | V0 = 130 mL, the training median |
+| training | each image rescaled by its labels' diameter, then scaled by U(0.75, 1.25) | no rescaling (`rescale=False`); scale augmentation, images of 7.5–120 px diameters | rescaled by the label's volume, then nnU-Net scaling (p 0.2, 0.7–1.4) |
+| 3D | `SizeModel` refuses 3D ("image is not 2D cannot compute diameter") | rescales 3D only from a given diameter | 3D throughout |
+
+From the code. Cellpose 3's `SizeModel.eval`:
+
+```python
+styles = self.cp.eval(x, ..., compute_masks=False)[-1]
+diam_style = self._size_estimation(np.array(styles))
+masks = self.cp.eval(x, compute_masks=True, ...,
+        rescale=self.diam_mean / diam_style if self.diam_mean > 0 else 1, ...)[0]
+diam = utils.diameters(masks)[0]
+```
+
+Cellpose 4's documentation: *"These models were trained on images with a range of
+diameters from 7.5 to 120 pixels"*, and *"the new Cellpose-SAM model is invariant to
+diameter, so this is optional."*
+
+What this means here:
+- **The method is Cellpose 3's idea, in 3D.** Cellpose never estimated size in 3D: its
+  size model works on 2D images only.
+- **Cellpose 4 dropped size normalisation** for robustness learned from data: many
+  thousands of images, with object sizes spread over a factor of 16. That is the
+  alternative a reviewer will raise. The strong-scale-augmentation baseline tests it here
+  (plain x4 with scaling p 0.5, 0.6–1.7: `runs/nnaug_x4strongscale_s*`; result pending).
+- **The data are very different.** 72 training heads per fold, whose linear sizes span a
+  factor of 2 ((291 / 35)^(1/3); the middle 80% within a factor of 1.23), is little to learn size
+  invariance from. That is where
+  normalisation should keep its advantage, if it has one.
+
 ## Conclusion
 
 Size normalisation makes the method **robust to small heads**, which plain x4 segments
