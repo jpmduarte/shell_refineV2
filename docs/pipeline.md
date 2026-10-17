@@ -73,8 +73,7 @@ Every scan is read once and stored as plain numpy arrays, so training never touc
   fetus are always in the same fold. *Why:* two scans of one fetus are nearly the same
   image, so one in training and one in validation would inflate the score.
 - Saved once in `splits.json` and reused by every run, so all numbers compare like for
-  like. nnU-Net was trained on the same folds. `splits_60525.json` is a separate
-  held-out split (60 train / 5 val / 25 test).
+  like. nnU-Net was trained on the same folds.
 
 ## 4. Size normalisation — `size_norm.py`
 
@@ -110,9 +109,8 @@ has to cope with heads of very different sizes, and the smallest are rare.
   Deployment does not cap (section 8).
 - **Which volume:** training caches use the true volume from the label (`cache_norm4`);
   evaluation uses the volume estimated by pass 1 (`--volumes`, giving
-  `cache_norm4_est_s<seed>`), which is what deployment has. On a held-out split, training
-  on true volumes was better than training on estimated ones; the estimate at test time
-  costs ~0.0005 Dice.
+  `cache_norm4_est_s<seed>`), which is what deployment has. The estimate at test time
+  costs ~0.0006 Dice against the true volume (results.md).
 
 ## 5. The network — `model.py`
 

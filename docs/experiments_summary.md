@@ -30,7 +30,6 @@ compared with the reference on those folds only.
 | + mirroring TTA (8 flips) | inference | x4 +0.0025 (p = 1e-8); norm 0.9480 | kept |
 | + ensemble of 3 seeds | inference | x4 +0.0021; **norm + TTA 0.9487** | kept, optional |
 | + blend pass 1's SDF (0.25) | inference | +0.0010 without TTA, +0.0004 with | optional, cheap without TTA |
-| train on estimated vs true volumes (60/5/25 held-out) | protocol | −0.0008 (p = 0.33), HD95 +0.16 | train on true volumes |
 | refiner: cascade at x2 (`phase2_v2`) | phase 2 | no gain on the x4 prior | dropped |
 | refiner: 1D surface profiles (+ context) | phase 2 | no gain | dropped |
 | refiner: native band, 64³ cubes, on ens+TTA priors | phase 2 | ±0.0000 to −0.0004 (seed 42, 2 folds); 2–10 s per case | dropped: no gain at 10–30× cost |

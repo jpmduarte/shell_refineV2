@@ -79,17 +79,6 @@ consistently and fixes the small heads that used to fail at x8.
 volume pass 1 estimates gives 0.9462; with the true volume (oracle) 0.9468. Pass 1's
 volume error is 4.3% median (20% at worst); the error of the scale k it gives is 1.4%.
 
-**Held-out split** `splits_60525.json`: 60 train / 5 val / 25 test, patient-grouped,
-stratified by head size, 3 seeds per arm. Test normalised with the estimated volume:
-
-| Training heads normalised with | Test, estimated volume | Test, true volume |
-|---|---|---|
-| A: the true volume | **0.9460** / 3.31 / 1.074 | 0.9465 / 3.36 |
-| B: the estimated volume | 0.9452 / 3.47 / 1.093 | 0.9452 / 3.49 |
-
-B − A: Dice −0.0008 (p = 0.33), HD95 +0.16 (p = 0.045). **Train with the true volume**;
-the estimate at test time costs 0.0005 Dice.
-
 ## Other arms since the restart (one model, no TTA, 3 seeds)
 
 | Arm | Folds | Dice | HD95 | ASD | Reference on the same folds |
