@@ -4,16 +4,21 @@
 #
 # The SDF tells a voxel how far the nearest surface is; the radii tell it where the
 # surface is in every direction, which needs the whole head in view. Trained as an
-# auxiliary output (size_normalization_approach/train.py --polar-coef), they push the
-# shared features towards that global context; prediction still uses the SDF alone.
+# auxiliary output (train.py here), they push the shared features towards that global
+# context; prediction still uses the SDF alone.
+#
+# v1 (v1/results.md) supervised 128 random interior points per sample (`targets`); v2
+# supervises the head's centre only (`centre_targets`).
 
 import numpy as np
 from scipy.ndimage import map_coordinates
 
 N_DIRS = 64          # directions on the sphere
-N_POINTS = 128       # interior points supervised per training sample
-RADIUS_SCALE = 20.0  # voxels; radii are predicted and compared divided by this (a head
-                     # normalised to V0 has a radius of ~19 voxels at x4)
+N_POINTS = 128       # v1: interior points supervised per training sample
+RADIUS_SCALE = 20.0  # v1: voxels; radii were predicted and compared divided by this
+MEAN_RADIUS_VOX = 19.6   # a 130 mL head (V0) as a sphere: 31.4 mm, on the 1.6 mm x4 grid
+CENTRE_JITTER_VOX = 1.0  # training centres are jittered by this (std per axis): pass 1's
+                         # centre is 1.26 mm (~0.8 voxel) from the label's at inference
 
 
 # n directions spread evenly over the sphere (a Fibonacci lattice), as unit vectors in
@@ -61,7 +66,23 @@ def ray_radii(sdf_vox: np.ndarray, points: np.ndarray, dirs: np.ndarray,
     return ((lo + hi) / 2).reshape(k, d).astype(np.float32)
 
 
-# Training targets for one sample: N_POINTS random voxels inside the head and their radii.
+# v2 training target for one sample: the head's centre (the centroid of SDF < 0, jittered
+# like pass 1's estimate) and the radii from it, in voxels. Returns (centre (3,) float32,
+# radii (D,) float32, weight 1 or 0 when no head is in view).
+def centre_targets(sdf: np.ndarray, spacing_mm: float, trunc_mm: float, rng, dirs: np.ndarray):
+    inside = np.argwhere(sdf < 0)
+    if len(inside) == 0:
+        return np.full(3, sdf.shape[0] / 2, np.float32), np.ones(len(dirs), np.float32), 0.0
+    c = inside.mean(0) + rng.normal(0.0, CENTRE_JITTER_VOX, 3)
+    sdf_vox = sdf.astype(np.float32) * trunc_mm / spacing_mm
+    r = ray_radii(sdf_vox, c[None], dirs)[0]
+    # A jittered centre can land outside a thin or cut head (every ray then has radius 0):
+    # that sample gets no polar loss.
+    w = 1.0 if r.min() > 0.5 else 0.0
+    return c.astype(np.float32), np.maximum(r, 0.5).astype(np.float32), w
+
+
+# v1 training targets for one sample: N_POINTS random voxels inside the head and their radii.
 # sdf: the normalised SDF on the cube (x trunc_mm = mm); spacing_mm: the grid's voxel size.
 # Returns (points (K, 3) int64, radii (K, D) in voxels, weight 1 or 0 when no head is in view).
 def targets(sdf: np.ndarray, spacing_mm: float, trunc_mm: float, rng, dirs: np.ndarray):

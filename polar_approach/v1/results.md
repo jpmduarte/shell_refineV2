@@ -1,5 +1,9 @@
 # The polar head: does it help?
 
+These runs used the first version of the head, a 1x1x1 convolution inside the U-Net
+(`model.py` `polar_dirs`, `train.py --polar-coef`), since moved out of the baseline. The
+code is at commit `f2bc53c`; `radii_test.py` here needs it (`forward_with_polar`).
+
 An auxiliary output trained with the size-normalised network (`polar.py`,
 `train.py --polar-coef 0.5`): per voxel, the head's radius in 64 fixed directions,
 supervised at 128 interior points per sample. The aim was global shape context for the SDF
@@ -24,7 +28,7 @@ others' (0.0168 against 0.0087). Without fold 4 the change is still −0.0009.
 
 ## 2. Radii for biometry
 
-[polar_radii_test.py](polar_radii_test.py): from pass 1's centre, the head's radius in the
+[radii_test.py](radii_test.py): from pass 1's centre, the head's radius in the
 64 directions read three ways, against the label's rays from the same centre:
 
 | | mean radius error | median |

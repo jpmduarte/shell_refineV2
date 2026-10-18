@@ -44,11 +44,8 @@ class UNet3D(nn.Module):
     # the network, its checkpoints and a seeded initialisation are exactly as before.
     # depth = pooling levels (3: 16-32-64, bottleneck 128; 4 adds a 128 level, bottleneck
     # 256, and needs inputs divisible by 16).
-    # polar_dirs > 0 adds a polar head, also for training only: per voxel, the distance to
-    # the head's surface along each of polar_dirs fixed directions (polar.py), positive
-    # (softplus), in units of polar.RADIUS_SCALE voxels. Created last, for the same reason.
     def __init__(self, in_channels: int = 1, base_channels: int = 16, contour_head: bool = False,
-                 depth: int = DEPTH, polar_dirs: int = 0):
+                 depth: int = DEPTH):
         super().__init__()
         self.depth = depth
         # Channels per level, doubling at each pooling: 16, 32, 64.
@@ -79,9 +76,6 @@ class UNet3D(nn.Module):
         # Optional contour output (sigmoid), from the same features.
         self.contour_head = nn.Conv3d(base_channels, 1, kernel_size=1) if contour_head else None
 
-        # Optional polar output, from the same features.
-        self.polar_head = nn.Conv3d(base_channels, polar_dirs, kernel_size=1) if polar_dirs else None
-
     # The SDF only: what prediction uses, with or without a contour head.
     def forward(self, x):
         return torch.tanh(self.head(self.features(x)))
@@ -97,12 +91,7 @@ class UNet3D(nn.Module):
         d = self.features(x)
         return torch.tanh(self.head(d)), torch.sigmoid(self.contour_head(d))
 
-    # Training with a polar head: (SDF, radii (N, polar_dirs, D, H, W) / RADIUS_SCALE).
-    def forward_with_polar(self, x):
-        d = self.features(x)
-        return torch.tanh(self.head(d)), F.softplus(self.polar_head(d))
-
-    # The last decoder level's features, shared by every head.
+    # The last decoder level's features, shared by both heads.
     def features(self, x):
         # Encoder, keeping each level's output for its skip connection.
         skips = []
