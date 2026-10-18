@@ -17,8 +17,9 @@ from torch.utils.data import Dataset
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from cache import load as load_image  # noqa: E402
 from geometry import CUBE, FACTOR  # noqa: E402
-from make_sdf import load as load_sdf, load_mm as load_sdf_mm  # noqa: E402
+from make_sdf import TRUNC_MM, load as load_sdf, load_mm as load_sdf_mm  # noqa: E402
 from nnunet_augmentation import augment_nnunet, pad_to_cube  # noqa: E402
+import polar  # noqa: E402
 
 
 # (image, SDF) pairs from cache_dir/x4 and cache_dir/sdf/x4 (or sdf/x4mm when augmenting),
@@ -27,12 +28,19 @@ from nnunet_augmentation import augment_nnunet, pad_to_cube  # noqa: E402
 class SDFDataset(Dataset):
 
     def __init__(self, cache_dir: str, case_ids: list[str], augment: bool = False,
-                 seed: int = None, factor: int = FACTOR, cube: int = CUBE):
+                 seed: int = None, factor: int = FACTOR, cube: int = CUBE,
+                 scale_p: float = 0.2, scale_range: tuple = (0.7, 1.4), polar_targets: bool = False):
         self.cache_dir = cache_dir
         self.case_ids  = case_ids
         self.augment   = augment
         self.factor    = factor
         self.cube      = cube
+        # The augmentation's scaling: probability and range (nnU-Net's by default).
+        self.scale_p, self.scale_range = scale_p, tuple(scale_range)
+        # With polar_targets, each item also carries the polar head's targets (polar.py):
+        # (x, y, points, radii, weight), computed on the augmented SDF.
+        self.polar_targets = polar_targets
+        self.dirs = polar.directions() if polar_targets else None
         mm_dir = os.path.join(cache_dir, "sdf", f"x{factor}mm")
         if augment and not os.path.isdir(mm_dir):
             raise ValueError(f"augmentation needs the untruncated field {mm_dir} "
@@ -46,12 +54,13 @@ class SDFDataset(Dataset):
 
     def __getitem__(self, idx: int):
         cid = self.case_ids[idx]
-        img, _ = load_image(self.cache_dir, cid, self.factor)
+        img, affine = load_image(self.cache_dir, cid, self.factor)
         img = img.astype(np.float32)
 
         if self.augment:
             sdf_mm, _ = load_sdf_mm(self.cache_dir, cid, self.factor)
-            img, sdf = augment_nnunet(img, sdf_mm.astype(np.float32), self._rng, self.cube)
+            img, sdf = augment_nnunet(img, sdf_mm.astype(np.float32), self._rng, self.cube,
+                                      scale_p=self.scale_p, scale_range=self.scale_range)
         else:
             sdf, _ = load_sdf(self.cache_dir, cid, self.factor)
             # Pad the image with 0 and the SDF with +1 (outside; 0 would put a fake surface
@@ -66,4 +75,9 @@ class SDFDataset(Dataset):
         # Add the channel axis: (1, D, H, W).
         x = img[np.newaxis].astype(np.float32)
         y = sdf[np.newaxis].astype(np.float32)
-        return torch.from_numpy(x), torch.from_numpy(y)
+        if not self.polar_targets:
+            return torch.from_numpy(x), torch.from_numpy(y)
+        # The grid's voxel size: augmentation scales the content, never the grid.
+        pts, radii, w = polar.targets(sdf, float(np.abs(affine[0, 0])), TRUNC_MM, self._rng, self.dirs)
+        return (torch.from_numpy(x), torch.from_numpy(y), torch.from_numpy(pts),
+                torch.from_numpy(radii), torch.tensor(w, dtype=torch.float32))

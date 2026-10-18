@@ -72,13 +72,15 @@ def mirror(img, sdf_mm, rng):
 #
 # As in batchgeneratorsv2, the scale multiplies the sampling coordinates: 1.4 shrinks the
 # head and 0.7 enlarges it. Every distance changes by 1/scale, hence the division below.
-def spatial_transform(img, sdf_mm, rng, cube):
+# scale_p and scale_range change the scaling's probability and range (the strong-scaling
+# baseline: train.py --scale-p, --scale-range); the defaults are nnU-Net's.
+def spatial_transform(img, sdf_mm, rng, cube, scale_p=0.2, scale_range=(0.7, 1.4)):
     do_rot   = rng.random() < 0.2
-    do_scale = rng.random() < 0.2
+    do_scale = rng.random() < scale_p
     if not (do_rot or do_scale):
         return None
     m = random_rotation(rng, np.deg2rad(30)) if do_rot else np.eye(3)
-    s = rng.uniform(0.7, 1.4) if do_scale else 1.0
+    s = rng.uniform(*scale_range) if do_scale else 1.0
     m = m @ (np.eye(3) * s)
 
     # For every voxel of the output cube, the point of the input it samples: offset from
@@ -171,14 +173,14 @@ def intensity_transform(x, rng):
 
 # The full augmentation: unpadded image and SDF in mm in, cube-shaped image and
 # normalised SDF ([-1, 1]) out.
-def augment_nnunet(img, sdf_mm, rng, cube, trunc_mm=TRUNC_MM):
+def augment_nnunet(img, sdf_mm, rng, cube, trunc_mm=TRUNC_MM, scale_p=0.2, scale_range=(0.7, 1.4)):
     # Mirroring first (the nnU-Net does it last), on the unpadded arrays, so the scan stays
     # at the origin of the cube, where prediction puts it. Rotations are symmetric, so the
     # order changes nothing else.
     img, sdf_mm = mirror(img, sdf_mm, rng)
 
     # Rotation and scaling, which also pad to the cube; if neither was drawn, just pad.
-    out = spatial_transform(img, sdf_mm, rng, cube)
+    out = spatial_transform(img, sdf_mm, rng, cube, scale_p, scale_range)
     if out is None:
         img = pad_to_cube(img, cube, cval=0.0)
         sdf_mm = pad_to_cube(sdf_mm, cube, cval=FAR_MM)

@@ -46,9 +46,10 @@ FLIPS = [[axis for axis, flip in enumerate(flips) if flip]
 def load_net(path: str, dev):
     state = torch.load(path, map_location=dev)
     # Width read from the checkpoint itself (first convolution). A checkpoint trained with
-    # a contour head carries its weights; the head is built so it loads, but unused.
+    # a contour or polar head carries its weights; the head is built so it loads, but unused.
     model = UNet3D(base_channels=state["enc1.block.0.weight"].shape[0],
-                   contour_head="contour_head.weight" in state).to(dev)
+                   contour_head="contour_head.weight" in state,
+                   polar_dirs=state["polar_head.weight"].shape[0] if "polar_head.weight" in state else 0).to(dev)
     model.load_state_dict(state)
     model.eval().requires_grad_(False)
 

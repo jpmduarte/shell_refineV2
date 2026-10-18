@@ -72,9 +72,14 @@ def main():
                    help="the normalised network's training cache: its norm.json gives V0")
     p.add_argument("--k-range", type=float, nargs=2, default=[0.5, 2.0],
                    help="pass-1 scales accepted by the normalised method; outside: pass 1's mask")
-    p.add_argument("--out", default=None, help="default: runs/size_shift_fold<k>_s<seed>.json")
+    p.add_argument("--plain-run", default="nnaug_x4e500",
+                   help="the run family scored as the plain method (e.g. nnaug_x4strongscale, "
+                        "trained with strong scaling); pass 1 of the normalised method stays "
+                        "nnaug_x4e500")
+    p.add_argument("--out", default=None, help="default: runs/size_shift[_<plain-run>]_fold<k>_s<seed>.json")
     a = p.parse_args()
-    out = a.out or os.path.join(SNA, "runs", f"size_shift_fold{a.fold}_s{a.seed}.json")
+    tag = "" if a.plain_run == "nnaug_x4e500" else f"_{a.plain_run}"
+    out = a.out or os.path.join(SNA, "runs", f"size_shift{tag}_fold{a.fold}_s{a.seed}.json")
 
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -82,8 +87,9 @@ def main():
         return load_net(os.path.join(SNA, "runs", f"{run}_s{a.seed}", f"fold{a.fold}",
                                      "checkpoints", "phase1_last.pth"), dev)[0]
 
-    plain = net("nnaug_x4e500")       # the plain x4 method, and pass 1 of the other
-    norm = net("nnaug_x4norm")        # pass 2 of the size-normalised method
+    pass1 = net("nnaug_x4e500")       # pass 1 of the size-normalised method
+    norm = net("nnaug_x4norm")        # its pass 2
+    plain = net(a.plain_run) if a.plain_run != "nnaug_x4e500" else pass1   # the plain method
     v0_ml = reference_v0(a.reference)
     folds = get_folds(case_ids(a.cache_dir), n_folds=5, seed=42,
                       splits_json=os.path.join(ROOT, "splits.json"))
@@ -100,8 +106,8 @@ def main():
             spacing = float(np.abs(aff1[0, 0]))
 
             mask_plain = (segment_plain(img, aff1, [plain], False, dev) < 0).cpu()
-            # A rejected scale returns pass 1's segmentation: the plain mask itself.
-            field, info = segment(img, aff1, plain, [norm], v0_ml, False, dev,
+            # A rejected scale returns pass 1's segmentation (the plain x4 mask).
+            field, info = segment(img, aff1, pass1, [norm], v0_ml, False, dev,
                                   k_range=tuple(a.k_range))
             mask_norm = (field < 0).cpu()
 
