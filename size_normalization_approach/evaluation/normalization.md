@@ -103,11 +103,53 @@ What this means here:
 - **Cellpose 4 dropped size normalisation** for robustness learned from data: many
   thousands of images, with object sizes spread over a factor of 16. That is the
   alternative a reviewer will raise. The strong-scale-augmentation baseline tests it here
-  (plain x4 with scaling p 0.5, 0.6–1.7: `runs/nnaug_x4strongscale_s*`; result pending).
+  (section 4).
 - **The data are very different.** 72 training heads per fold, whose linear sizes span a
   factor of 2 ((291 / 35)^(1/3); the middle 80% within a factor of 1.23), is little to learn size
   invariance from. That is where
   normalisation should keep its advantage, if it has one.
+
+## 4. Normalising or augmenting: the strong-scaling baseline
+
+Plain x4 trained with much stronger scale augmentation (scaling with probability 0.5 and
+factor 0.6–1.7, against nnU-Net's 0.2 and 0.7–1.4; `train.py --scale-p 0.5 --scale-range
+0.6 1.7`, runs `nnaug_x4strongscale_s42`, `_s43`). Seeds 42 and 43, 5 folds each, 90 cases,
+the per-case mean over the two seeds, paired Wilcoxon, all three methods on the same seeds.
+
+**Real heads**
+
+| | plain x4 | plain x4 + strong scaling | size-normalised |
+|---|---|---|---|
+| Dice | 0.9442 | 0.9443 | **0.9463** |
+| HD95 (mm) | 3.45 | 3.42 | **3.14** |
+| ASD (mm) | 1.099 | 1.097 | **1.055** |
+
+Strong scaling against plain: Dice +0.0001 (p = 0.94), HD95 −0.03 mm (p = 0.63).
+Normalised against strong scaling: Dice +0.0021 (p = 0.019), HD95 −0.28 mm (p = 0.041),
+ASD −0.042 mm (p = 0.034).
+
+**Synthetic size shift** (`size_shift_test.py --plain-run nnaug_x4strongscale`; Dice)
+
+| head scale | strong scaling | size-normalised | plain x4 |
+|---|---|---|---|
+| 0.60 | **0.849** | 0.752 | 0.708 |
+| 0.70 | 0.928 | **0.933** | 0.903 |
+| 0.85 | 0.943 | **0.945** | 0.939 |
+| 1.00 | 0.944 | **0.946** | 0.944 |
+| 1.15 | 0.943 | **0.946** | 0.943 |
+| 1.30 | 0.940 | **0.946** | 0.937 |
+| 1.50 | 0.932 | **0.945** | 0.924 |
+
+- **On real heads, stronger augmentation changes nothing**, and the normalised method is
+  better on all three metrics.
+- **Under a size shift it helps plain x4 at the extremes** but stays below normalisation
+  from 0.7× to 1.5×. Only the normalised method stays flat over that range.
+- **At 0.6× strong scaling wins** (0.849 vs 0.752). There pass 1, the plain x4 network,
+  fails on very small heads and the normalised method falls back to it. A pass 1 trained
+  with strong scaling is the obvious fix, and needs no new training.
+
+With 72 training heads per fold, augmentation does not buy the invariance that Cellpose 4
+gets from its data. Normalisation does.
 
 ## Conclusion
 
