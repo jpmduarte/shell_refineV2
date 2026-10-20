@@ -8,7 +8,7 @@ Everything since the folds were regrouped by patient (commit `5f3bc7d`). The old
 - 90 volumes, 5-fold cross-validation grouped by patient (`splits.json`); nnU-Net trained on
   the same folds (`nnunet/runs/grouped_*`).
 - Dice, HD95 (mm), ASD (mm) at native resolution against the label.
-- Our numbers are the **last epoch** (nothing selected on the reported fold), and the
+- Our numbers are the last epoch (nothing selected on the reported fold), and the
   **per-case mean over 3 seeds** (42, 43, 44). A method is compared on the same 90 cases with
   a paired Wilcoxon test; one seed is never enough to conclude (seed-to-seed spread is
   ~0.002 Dice).
@@ -131,7 +131,7 @@ x2 needs 27 GB to train at batch 4; on the 12 GB card it ran at batch 1 with 4-b
 gradient accumulation (`--accum 4`), 6.2 h per fold, and was stopped after fold 0. The SDF
 beats the mask without TTA at x8 and x4; with TTA the x4 mask ties.
 
-**Representation ceiling** — the true target on the coarse grid, carried to native and
+**Representation ceiling**: the true target on the coarse grid, carried to native and
 thresholded, as a perfect network would predict it (90 cases):
 
 | Grid | SDF | mask |
@@ -174,7 +174,7 @@ the 3 repeats agree to the millisecond.
 | nnU-Net | 1339 ms | 935–2345 | — | — | sliding window | 30.8 M |
 | nnU-Net + TTA | 8870 ms | 5956–15733 | — | — | sliding window × 8 | 30.8 M |
 
-- Size-norm one model is **38× faster** than nnU-Net; with TTA, 12× faster than nnU-Net
+- Size-norm one model is 38× faster than nnU-Net; with TTA, 12× faster than nnU-Net
   without TTA and 77× faster than nnU-Net + TTA; the ensemble + TTA is 30× faster than
   nnU-Net + TTA. Ours barely varies with the scan (always a 96³ cube); nnU-Net's sliding
   window scales with the volume.

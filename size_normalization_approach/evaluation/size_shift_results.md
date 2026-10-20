@@ -48,8 +48,8 @@ three seeds agree at every scale (normalised − plain, by seed: +0.042 to +0.04
 
 Scoring a rejected scale as a failure (Dice 0) instead: 0.6156 at 0.6× (below plain, 94
 of 270 rejected), 0.9276 at 0.7×, 0.9422 at 0.85×; unchanged from 1.0× up. The 0.5–2
-window is about the GPU, not about plausibility: at 0.6× many heads are genuinely below
-16 mL (k ≈ 0.4) and are rejected although they could be normalised. A tiny but non-zero
+window is about the GPU, not about plausibility: at 0.6× the true volume of many heads is
+below 16 mL (k ≈ 0.4), and they are rejected although they could be normalised. A tiny but non-zero
 estimate (k ≈ 0.05) asks for a grid that does not fit in 12 GB, which is what the window
 prevents.
 

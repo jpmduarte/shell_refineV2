@@ -1,7 +1,7 @@
 # Does size normalisation help, and where?
 
 The size-normalised x4 method beats plain x4 by +0.0015 Dice in cross-validation (p = 0.055,
-3 seeds, [../../results.md](../../results.md)) — a small average gain. Two tests ask where it
+3 seeds, [../../results.md](../../results.md)), a small average gain. Two tests ask where it
 comes from: a synthetic one that rescales the heads, and one on the dataset's real spread
 of head sizes. They agree on small heads and disagree on large ones, and the real-size test
 is the one to trust where they differ.
@@ -43,7 +43,7 @@ the label's head volume (35–291 mL, V0 = 130 mL). Paired Wilcoxon within each 
 | Normalised − plain | −0.23 (p = 0.03) | +0.15 (p = 0.16) |
 
 **Reading.**
-- The gain is **on small heads**: +0.004 to +0.005 Dice and −0.3 mm HD95, significant even
+- The gain is on small heads: +0.004 to +0.005 Dice and −0.3 mm HD95, significant even
   with 18–30 cases. It shrinks as the head grows (ρ = −0.23).
 - **Large heads gain nothing in Dice**, though their HD95 drops by 0.3–0.5 mm (not tested
   for significance).
@@ -153,7 +153,7 @@ gets from its data. Normalisation does.
 
 ## Conclusion
 
-Size normalisation makes the method **robust to small heads**, which plain x4 segments
+Size normalisation makes the method robust to small heads, which plain x4 segments
 worse (they span few voxels at 1.6 mm), and lowers HD95 on large ones. It does not improve
 the Dice of large heads. Its average gain is small because the dataset is concentrated
 around the median size; on data with more small heads (earlier gestational ages) it would

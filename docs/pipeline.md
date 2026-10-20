@@ -1,7 +1,7 @@
 # How the method works
 
 Fetal head segmentation in 3D ultrasound. A small 3D U-Net predicts the **signed distance
-to the head's surface** rather than a mask, on a coarse grid in which **every head has
+to the head's surface rather than a mask, on a coarse grid in which every head has
 been resized to the same apparent size**. Two passes: the first measures the head, the
 second segments it at the normalised size. Result: Dice 0.9487, HD95 3.01 mm, ASD 1.01 mm
 over 5 folds, tied with nnU-Net (1000 epochs, no TTA) at 1/11 of the parameters and
@@ -45,7 +45,7 @@ Shared building blocks (caches, SDF, augmentation, model, geometry) are at the r
 
 ---
 
-## 1. The image cache — `cache.py`
+## 1. The image cache: `cache.py`
 
 Every scan is read once and stored as plain numpy arrays, so training never touches NIfTI.
 
@@ -61,7 +61,7 @@ Every scan is read once and stored as plain numpy arrays, so training never touc
 - **The label is never resampled**, [cache.py:85](../cache.py#L85). *Why:* resampling a
   mask moves its surface; all metrics are computed against this original label.
 
-## 2. The target: a signed distance field — `make_sdf.py`
+## 2. The target, a signed distance field: `make_sdf.py`
 
 - **`signed_distance_mm`**, [make_sdf.py:32](../make_sdf.py#L32): for every voxel, the
   exact Euclidean distance in mm to the surface, positive outside and negative inside,
@@ -69,7 +69,7 @@ Every scan is read once and stored as plain numpy arrays, so training never touc
 - **Truncated to ±10 mm and scaled to [-1, 1]**, [make_sdf.py:44](../make_sdf.py#L44).
 - *Why an SDF instead of a mask:* a mask says only inside/outside; on a 1.6 mm grid that
   quantises the surface to whole voxels. A distance field varies smoothly, so the zero
-  crossing — the surface — can fall *between* voxels, and interpolating it back to 0.4 mm
+  crossing (the surface) can fall *between* voxels, and interpolating it back to 0.4 mm
   keeps that sub-voxel position. *Why truncate:* far from the head the exact distance says
   nothing about where the surface is, and would dominate the loss.
 - **The untruncated mm version**, [make_sdf.py:101](../make_sdf.py#L101) (`sdf/x4mm`).
@@ -77,7 +77,7 @@ Every scan is read once and stored as plain numpy arrays, so training never touc
   A field already clipped at 10 mm cannot be rescaled correctly, so the augmentation works
   on the mm field and truncates afterwards ([nnunet_augmentation.py:154](../nnunet_augmentation.py#L154)).
 
-## 3. The folds — `splits.py`
+## 3. The folds: `splits.py`
 
 - **Grouped by patient**, [splits.py:28](../splits.py#L28) and
   [splits.py:36](../splits.py#L36). 90 volumes come from 82 patients; scans of the same
@@ -86,7 +86,7 @@ Every scan is read once and stored as plain numpy arrays, so training never touc
 - Saved once in `splits.json` and reused by every run, so all numbers compare like for
   like. nnU-Net was trained on the same folds.
 
-## 4. Size normalisation — `size_norm.py`
+## 4. Size normalisation: `size_norm.py`
 
 The idea of the method. Head volumes range from 35 to 291 mL. On a fixed grid the network
 has to cope with heads of very different sizes, and the smallest are rare.
@@ -122,7 +122,7 @@ has to cope with heads of very different sizes, and the smallest are rare.
   the native image (section 8), with the volume pass 1 estimates. The estimate costs
   ~0.0006 Dice against the true volume (results.md).
 
-## 5. The network — `model.py`
+## 5. The network: `model.py`
 
 - **3D U-Net**, [model.py:39](../model.py#L39): three pooling levels
   ([model.py:17](../model.py#L17)), 16 → 32 → 64 channels, a 128-channel bottleneck
@@ -134,7 +134,7 @@ has to cope with heads of very different sizes, and the smallest are rare.
 - *Why this small:* at x4 with normalised heads the task is narrow. A fourth level
   (5.6 M parameters) gave nothing. The same architecture serves both passes.
 
-## 6. Training — `size_normalization_approach/train.py`, `size_normalization_approach/dataset.py`, `nnunet_augmentation.py`, `loss.py`
+## 6. Training: `size_normalization_approach/train.py`, `size_normalization_approach/dataset.py`, `nnunet_augmentation.py`, `loss.py`
 
 - **Data**, [dataset.py:28](../size_normalization_approach/dataset.py#L28): each item is the x4 image and
   its SDF, padded at the far end of each axis to 96³ ([nnunet_augmentation.py:32](../nnunet_augmentation.py#L32)).
@@ -146,7 +146,7 @@ has to cope with heads of very different sizes, and the smallest are rare.
   ([nnunet_augmentation.py:71](../nnunet_augmentation.py#L71)), then noise, blur, brightness, contrast,
   low resolution and gamma ([nnunet_augmentation.py:108](../nnunet_augmentation.py#L108)): the same
   transforms, probabilities and ranges as nnU-Net v2. Two adaptations: the SDF is
-  interpolated linearly and **divided by the zoom factor**, because distances scale with
+  interpolated linearly and divided by the zoom factor, because distances scale with
   the image. *Why nnU-Net's:* it is the reference we compare against, and adopting its
   augmentation was a clear gain over our earlier simple one.
 - **Loss**, [train.py:46](../size_normalization_approach/train.py#L46): L1 on the SDF + 0.5 × a
@@ -158,7 +158,7 @@ has to cope with heads of very different sizes, and the smallest are rare.
   ([train.py:183](../size_normalization_approach/train.py#L183)), batch 4.
 - **Checkpoint: the last epoch**, [train.py:220](../size_normalization_approach/train.py#L220). Validation is
   logged for curves only. *Why:* picking the best epoch on the validation fold is picking on
-  the test data; that inflated Dice by 0.0024 before we stopped. Choosing it honestly, on an
+  the test data; that inflated Dice by 0.0024 before we stopped. Choosing it without the test data, on an
   inner validation set held out of training (`--inner-val 5`), is no better than the last
   epoch (−0.0004, p = 0.34; results.md).
 - **Seeds**, [train.py:135](../size_normalization_approach/train.py#L135): a seed fixes weights, batch order,
@@ -168,7 +168,7 @@ has to cope with heads of very different sizes, and the smallest are rare.
 - **Two networks are trained per fold**: the plain x4 network on `cache` (pass 1) and the
   normalised network on `cache_norm4` (pass 2). Same code; only `--cache-dir` differs.
 
-## 7. Prediction and evaluation — `size_normalization_approach/evaluation/predict.py`, `size_normalization_approach/evaluation/evaluate.py`, `metrics.py`
+## 7. Prediction and evaluation: `size_normalization_approach/evaluation/predict.py`, `size_normalization_approach/evaluation/evaluate.py`, `metrics.py`
 
 - **Predict**, [predict.py](../size_normalization_approach/evaluation/predict.py): runs the method of
   section 8 on each cached native volume and saves the native SDF. `--pass1` makes it the
@@ -181,7 +181,7 @@ has to cope with heads of very different sizes, and the smallest are rare.
   predictions are scored by the same functions against the same labels
   (`scripts/score_nnunet.py`).
 
-## 8. The method at inference — `size_normalization_approach/infer.py`
+## 8. The method at inference: `size_normalization_approach/infer.py`
 
 [`segment`](../size_normalization_approach/infer.py) is the method on one scan, entirely on
 the GPU, native image in, native SDF out. Everything that runs the networks calls it:
@@ -196,10 +196,10 @@ the GPU, native image in, native SDF out. Everything that runs the networks call
    own segmentation. On the 90 cases every k lies in 0.65–1.27.
 4. **Normalise**: resample the native volume at the spacing that makes this head V0, read
    from the training cache's `norm.json` (`--reference`, default `cache_norm4`).
-5. **Pass 2**: the normalised network. Optional **TTA**: the 8 mirror images of the input,
-   each prediction mirrored back and averaged (`forward`). Optional **ensemble**: the SDFs
+5. **Pass 2**: the normalised network. Optional TTA: the 8 mirror images of the input,
+   each prediction mirrored back and averaged (`forward`). Optional ensemble: the SDFs
    of 3 seeds averaged. Averaging SDFs (not masks) keeps the result a smooth field.
-6. **Back to native** and threshold at 0. Optional **blend** (`--blend 0.25`): pass 1's SDF,
+6. **Back to native** and threshold at 0. Optional blend (`--blend 0.25`): pass 1's SDF,
    also carried to native, is mixed in as 0.25 × pass 1 + 0.75 × pass 2. Pass 1 sees the
    head at its real size and pass 2 at the canonical size, so their errors partly cancel.
    On 90 cases: +0.0010 Dice without TTA for ~6 ms, +0.0004 with TTA (where pass 1 then
@@ -225,7 +225,7 @@ in a test.
 Cost on an RTX 5070, per case: 35 ms (one model), 115 ms (+TTA), 300 ms (3 seeds + TTA),
 0.7 GB of GPU memory. nnU-Net: 1.35 s, or 8.9 s with TTA.
 
-## 9. Resampling — `geometry.py`
+## 9. Resampling: `geometry.py`
 
 Every grid carries an affine (voxel index → mm). Resampling = for each output voxel, find
 its position in the input through the two affines, and interpolate.
@@ -243,7 +243,7 @@ its position in the input through the two affines, and interpolate.
   axis by its own ratio, which distorts the anatomy; the affine keeps millimetres
   millimetres.
 
-## 10. Measuring cost — `scripts/`
+## 10. Measuring cost: `scripts/`
 
 | Script | What it measures |
 |---|---|

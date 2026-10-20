@@ -1,6 +1,6 @@
 # Every experiment, in one place
 
-Two protocols, **not comparable with each other**:
+Two protocols, not comparable with each other:
 
 - **Current** (from 28 Sep 2026): patient-grouped 5-fold CV, last epoch, per-case mean of
   3 seeds, 90 cases, paired Wilcoxon. Details in [results.md](../results.md).
