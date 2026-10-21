@@ -178,8 +178,7 @@ has to cope with heads of very different sizes, and the smallest are rare.
 - **Evaluate**, [evaluate.py:32](../size_normalization_approach/evaluation/evaluate.py#L32): mask = SDF < 0, scored
   against the original label: Dice, HD95 and ASD in mm ([metrics.py:33](../metrics.py#L33),
   [metrics.py:52](../metrics.py#L52), [metrics.py:61](../metrics.py#L61)). nnU-Net's
-  predictions are scored by the same functions against the same labels
-  (`scripts/score_nnunet.py`).
+  predictions were scored by the same functions against the same labels.
 
 ## 8. The method at inference: `size_normalization_approach/infer.py`
 
@@ -248,11 +247,8 @@ its position in the input through the two affines, and interpolate.
 | Script | What it measures |
 |---|---|
 | `bench_pipeline.py` | our inference (`infer.py`): time per stage, GPU memory, RAM, CPU, Dice check |
-| `bench_nnunet.py` | nnU-Net's inference on the same cases and machine (env `nnunet-bench`) |
 | `profile_run.py` | any command (e.g. training): GPU memory, RAM, CPU and GPU use over time |
 | `probe_vram.py` | one training step's peak GPU memory, for the job queue |
-| `nnunet_profile_dataset.py` | a small local dataset to profile nnU-Net's training |
-| `score_nnunet.py` | nnU-Net's predictions, scored with our metrics |
 
 Results of the last measurement are in `docs/profiling/`.
 

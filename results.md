@@ -157,8 +157,8 @@ Time from the native volume in memory to the native mask in host memory, for bot
 (z-score, all passes, all resampling, threshold, copy back); disk reading excluded. nnU-Net
 through `nnUNetPredictor` (crop, z-score, sliding window with Gaussian blending, step 0.5,
 export), the 250-epoch checkpoints (same network and plans as 1000 epochs, so the same cost).
-`scripts/bench_pipeline.py --folds 0 1 2 3 4 --repeats 3`, `scripts/bench_nnunet.py` (same
-flags); results in `docs/profiling/bench_ours_90.json`, `bench_nnunet_90.json`. The medians of
+`scripts/bench_pipeline.py --folds 0 1 2 3 4 --repeats 3`, and nnU-Net with the same flags;
+results in `docs/profiling/bench_ours_90.json`, `bench_nnunet_90.json`. The medians of
 the 3 repeats agree to the millisecond.
 
 | | Time / case, median | p5–p95 | Networks only | Pipeline around them | Network passes | Params |
@@ -224,7 +224,5 @@ slower on this machine), so it could get faster. nnU-Net keeps the GPU saturated
 ```
 python scripts/bench_pipeline.py --folds 0                     # ours, inference
 python scripts/bench_pipeline.py --folds 0 --resampler geometry
-conda activate nnunet-bench
-python scripts/bench_nnunet.py --fold 0                        # nnU-Net, inference
 python scripts/profile_run.py --out prof.json -- <training command>
 ```
