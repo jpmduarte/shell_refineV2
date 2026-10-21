@@ -15,8 +15,8 @@ import sys
 import torch
 import torch.nn.functional as F
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from model import UNet3D  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # the repository root
+from common.model import UNet3D  # noqa: E402
 
 
 def main():

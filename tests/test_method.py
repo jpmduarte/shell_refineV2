@@ -22,16 +22,15 @@ import unittest
 import numpy as np
 import torch
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SNA = os.path.join(ROOT, "size_normalization_approach")
-sys.path[:0] = [ROOT, SNA]
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # the repository root
+from common.paths import NATIVE_CACHE, NORM_CACHE, SIZE_NORM_DIR, SIZE_NORM_RUNS  # noqa: E402
 
-from geometry import affine_resample, spacing_grid  # noqa: E402
-from infer import load_net, pad, segment, segment_plain  # noqa: E402
+from common.geometry import affine_resample, spacing_grid  # noqa: E402
+from size_normalization.infer import load_net, pad, segment, segment_plain  # noqa: E402
 
-CACHE = os.path.join(ROOT, "caches", "cache")
-NORM_CACHE = os.path.join(ROOT, "caches", "cache_norm4")
-RUNS = os.path.join(SNA, "runs")
+CACHE = NATIVE_CACHE
+NORM_CACHE = NORM_CACHE
+RUNS = SIZE_NORM_RUNS
 CASE = "11_I0000071"          # fold 0, validation
 HAVE_DATA = os.path.isdir(CACHE) and os.path.isdir(os.path.join(RUNS, "nnaug_x4norm_s42"))
 HAVE_GPU = torch.cuda.is_available()
@@ -73,7 +72,7 @@ class Guard(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from cache import load
+        from common.image_cache import load
         cls.dev = torch.device("cuda")
         cls.pass1 = load_net(ckpt("nnaug_x4e500"), cls.dev)[0]
         cls.norm = load_net(ckpt("nnaug_x4norm"), cls.dev)[0]
@@ -111,9 +110,9 @@ class Reproduce(unittest.TestCase):
 
     def predict(self, *args):
         with tempfile.TemporaryDirectory() as tmp:
-            subprocess.run([sys.executable, os.path.join(SNA, "evaluation", "predict.py"), "--case", CASE,
+            subprocess.run([sys.executable, os.path.join(SIZE_NORM_DIR, "evaluation", "predict.py"), "--case", CASE,
                             "--out-dir", tmp, *args], check=True, stdout=subprocess.DEVNULL)
-            from cache import load_label
+            from common.image_cache import load_label
             sdf = np.load(os.path.join(tmp, f"{CASE}.npz"))["sdf"]
             lab = np.asarray(load_label(CACHE, CASE)[0]).squeeze().astype(bool)
             return dice(sdf < 0, lab)
@@ -137,7 +136,7 @@ class Segment(unittest.TestCase):
 
     def test_ras_and_lps(self):
         import nibabel as nib
-        from cache import load
+        from common.image_cache import load
         img, aff = load(CACHE, CASE, 1)
         img = np.asarray(img, np.float32).squeeze()
         dev = torch.device("cuda")
@@ -153,7 +152,7 @@ class Segment(unittest.TestCase):
             lps = nib.Nifti1Image(img[::-1, ::-1].copy(), aff @ flip)
             for name, im in (("ras", ras), ("lps", lps)):
                 nib.save(im, os.path.join(tmp, f"{name}.nii.gz"))
-                subprocess.run([sys.executable, os.path.join(SNA, "deploy", "segment.py"),
+                subprocess.run([sys.executable, os.path.join(SIZE_NORM_DIR, "deploy", "segment.py"),
                                 os.path.join(tmp, f"{name}.nii.gz"), os.path.join(tmp, f"{name}_mask.nii.gz"),
                                 "--v0-ml", "130"], check=True, stdout=subprocess.DEVNULL)
             m_ras = np.asarray(nib.load(os.path.join(tmp, "ras_mask.nii.gz")).dataobj)
@@ -174,7 +173,7 @@ class Cache(unittest.TestCase):
             dst = os.path.join(tmp, "norm")
             links = [os.path.join(dst, "x1"), os.path.join(dst, "label"), os.path.join(dst, "sdf", "x1")]
             try:
-                subprocess.run([sys.executable, os.path.join(ROOT, "size_norm.py"), "--dst", dst,
+                subprocess.run([sys.executable, os.path.join(SIZE_NORM_DIR, "build_cache.py"), "--dst", dst,
                                 "--limit", "1", "--v0-ml", "130"], check=True, stdout=subprocess.DEVNULL)
                 cid = sorted(os.listdir(os.path.join(dst, "x4")))[0]
                 for sub, key in (("x4", "img"), (os.path.join("sdf", "x4"), "sdf"),
@@ -184,7 +183,7 @@ class Cache(unittest.TestCase):
                         self.assertTrue(np.array_equal(new[key], old[key]), sub)
                         self.assertTrue(np.array_equal(new["affine"], old["affine"]), sub)
             finally:
-                # size_norm.py links x1/, label/ and sdf/x1/ to caches/cache/ (junctions on
+                # size_normalization/build_cache.py links x1/, label/ and sdf/x1/ to caches/cache/ (junctions on
                 # Windows). Remove the links themselves first, so cleaning up the temporary
                 # folder can never reach into the real cache.
                 for link in links:
@@ -197,7 +196,7 @@ class Train(unittest.TestCase):
 
     def test_two_seeded_epochs(self):
         with tempfile.TemporaryDirectory() as tmp:
-            subprocess.run([sys.executable, os.path.join(SNA, "train.py"), "--fold", "1", "--seed", "42",
+            subprocess.run([sys.executable, os.path.join(SIZE_NORM_DIR, "train.py"), "--fold", "1", "--seed", "42",
                             "--epochs", "2", "--run-dir", tmp], check=True, stdout=subprocess.DEVNULL)
             with open(os.path.join(tmp, "train_log.csv")) as f:
                 rows = f.read().split("\n")[1:3]

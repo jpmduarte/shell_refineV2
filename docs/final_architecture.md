@@ -70,7 +70,7 @@ Each step is reported as an ablation against the previous one: size only, + land
 - **Which landmarks** can be marked reliably at 19–24 weeks (thalami, cavum septi
   pellucidi, cerebellum, falx anterior/posterior, orbits?), and who annotates them.
 - **The two groups of labels** (UID-named vs patient-named files) put the head's boundary
-  ~0.5 mm apart (`size_normalization_approach/evaluation/pass1_error_results.md`); this
+  ~0.5 mm apart (`size_normalization/evaluation/pass1_error_results.md`); this
   lands directly in BPD and HC, so it has to be settled before step 4.
 - **Cut heads** (80 of 90 leave the sector): biometry needs the shape completed beyond the
   sector, but the labels stop at the sector's edge, so completion needs its own

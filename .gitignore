@@ -1,7 +1,7 @@
-# Generated data — regenerate with cache.py, make_sdf.py, size_norm.py.
+# Generated data: regenerate with common/image_cache.py, common/sdf_targets.py, size_normalization/build_cache.py.
 # cache/ alone is ~9GB; none of this is source.
 caches/
-size_normalization_approach/runs/
+size_normalization/runs/
 nnunet/runs/
 preds*/
 *.npz
@@ -45,6 +45,6 @@ venv/
 .idea/
 .DS_Store
 Thumbs.db
-boundary_refiner_2_phase_approach/phase2/runs/
-boundary_refiner_2_phase_approach/phase2/crops/
-boundary_refiner_2_phase_approach/priors/
+boundary_refiner/runs/
+boundary_refiner/crops/
+boundary_refiner/priors/

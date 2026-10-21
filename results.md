@@ -1,7 +1,7 @@
 # Results
 
 Everything since the folds were regrouped by patient (commit `5f3bc7d`). The older numbers in
-`docs/results.md` used folds that leaked patients and are not comparable with these.
+`docs/archive/results.md` used folds that leaked patients and are not comparable with these.
 
 ## Protocol
 
@@ -17,8 +17,8 @@ Everything since the folds were regrouped by patient (commit `5f3bc7d`). The old
   to choose the epoch with the best Dice; both scored on the outer fold: best 0.9426 / 3.53 /
   1.127, last 0.9430 / 3.51 / 1.118 (Dice −0.0004, p = 0.34, best better on 43/90). The
   chosen epoch ranged from 245 to 415, and the gap per run from −0.0069 to +0.0021
-  (`size_normalization_approach/runs/bestepoch_x4norm_s*`).
-- Evaluation runs the method as deployed (`size_normalization_approach/infer.py`, through
+  (`size_normalization/runs/bestepoch_x4norm_s*`).
+- Evaluation runs the method as deployed (`size_normalization/infer.py`, through
   `predict.py`): from the native image, with pass 1's volume. The size-normalised numbers
   below were first computed from estimated-volume caches; re-run through `infer.py`, all
   90 cases × 3 seeds give the same means (one model: Dice 0.9462, HD95 3.17, ASD 1.059
@@ -115,7 +115,7 @@ base channels (5.6 M params): 0.9433 against 0.9437 on seed 42 fold 0, then canc
 Same network and recipe; only the grid (`--factor`) and the target (`--loss sdf|mask`)
 change. The mask arm is Dice + BCE on the head mask (nnU-Net's binary loss); its
 probability is carried to the native grid and cut at 0.5. Paired Wilcoxon against x4 SDF.
-Inference on all 90 cases, 3 repeats (`bench_pipeline.py --pass2 <the arm's runs>`; the grid
+Inference on all 90 cases, 3 repeats (`benchmark_inference.py --pass2 <the arm's runs>`; the grid
 comes from each run's config.json).
 
 | Grid | Loss | Dice | Dice + TTA | HD95 | ASD | ms, one model / + TTA |
@@ -157,7 +157,7 @@ Time from the native volume in memory to the native mask in host memory, for bot
 (z-score, all passes, all resampling, threshold, copy back); disk reading excluded. nnU-Net
 through `nnUNetPredictor` (crop, z-score, sliding window with Gaussian blending, step 0.5,
 export), the 250-epoch checkpoints (same network and plans as 1000 epochs, so the same cost).
-`scripts/bench_pipeline.py --folds 0 1 2 3 4 --repeats 3`, and nnU-Net with the same flags;
+`scripts/benchmark_inference.py --folds 0 1 2 3 4 --repeats 3`, and nnU-Net with the same flags;
 results in `docs/profiling/bench_ours_90.json`, `bench_nnunet_90.json`. The medians of
 the 3 repeats agree to the millisecond.
 
@@ -185,7 +185,7 @@ the 3 repeats agree to the millisecond.
   nnU-Net 0.62 s (1.85 s with TTA). RAM includes the PyTorch/CUDA runtime (~1.4 GB).
 - The contour-head, soft-mask and fine-input arms use the same inference network, so they
   cost the same (fine input would add the 2× grid resampling).
-- Turning a label into the SDF training target (`scripts/bench_sdf.py`): 1.7 s per case
+- Turning a label into the SDF training target (`scripts/benchmark_sdf.py`): 1.7 s per case
   median (1.3–3.4 s), 3 min for the 90 cases, almost all in the exact distance transform at
   native resolution. A one-off cache-building cost; inference never does it.
 - Resampling uses `geometry.affine_resample` (analytic grid on the GPU). The older path
@@ -222,7 +222,7 @@ slower on this machine), so it could get faster. nnU-Net keeps the GPU saturated
 ## Reproduce
 
 ```
-python scripts/bench_pipeline.py --folds 0                     # ours, inference
-python scripts/bench_pipeline.py --folds 0 --resampler geometry
+python scripts/benchmark_inference.py --folds 0                     # ours, inference
+python scripts/benchmark_inference.py --folds 0 --resampler geometry
 python scripts/profile_run.py --out prof.json -- <training command>
 ```

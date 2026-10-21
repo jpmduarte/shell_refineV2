@@ -1,6 +1,6 @@
 # Runs any command and records what it costs the machine while it runs.
 #
-#     python scripts/profile_run.py --out prof.json -- python size_normalization_approach/train.py ...
+#     python scripts/profile_run.py --out prof.json -- python size_normalization/train.py ...
 #
 # Sampled every --every seconds:
 #     GPU memory   the card's total use minus its use before launch. Windows' driver gives
