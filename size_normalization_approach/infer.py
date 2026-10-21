@@ -45,9 +45,6 @@ FLIPS = [[axis for axis, flip in enumerate(flips) if flip]
 # Returns (model, config) with config {"factor", "cube", "loss"}.
 def load_net(path: str, dev):
     state = torch.load(path, map_location=dev)
-    # The first polar-head runs (nnaug_x4normpolar) kept that head inside the U-Net's own
-    # checkpoint; prediction never used it, so it is dropped here.
-    state = {k: v for k, v in state.items() if not k.startswith("polar_head.")}
     # Width read from the checkpoint itself (first convolution). A checkpoint trained with
     # a contour head carries its weights; the head is built so it loads, but unused.
     model = UNet3D(base_channels=state["enc1.block.0.weight"].shape[0],

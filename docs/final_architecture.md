@@ -28,15 +28,13 @@ a block stays only if an ablation shows it helps.
 │ PASS 2: one network, trained on normalised heads          │
 │   STN: a small encoder predicts the rotation R (6D)       │
 │        V_norm resampled with R  ─► clinical canonical space│
-│   3D U-Net in the canonical space, three outputs:         │
+│   3D U-Net in the canonical space, two outputs:           │
 │     A  SDF            continuous surface (the segmentation)│
-│     B  polar head     radii in 64 directions: closes the  │
-│                       shape across shadows and the sector │
-│     C  landmarks      3D heatmaps ─► soft-argmax ─► points │
+│     B  landmarks      3D heatmaps ─► soft-argmax ─► points │
 └──────────────────────────────────────────────────────────┘
        │
        ├─► SDF rotated back with R⁻¹ ─► mask in the native volume
-       └─► landmarks + polar radii in the canonical space ─► biometry
+       └─► landmarks + SDF in the canonical space ─► biometry
            (BPD, OFD, HC in the standard planes; head volume)
 ```
 
@@ -60,13 +58,12 @@ Two design choices, both from what was measured:
 | Step | Block | Status | Needs | Kept if |
 |---|---|---|---|---|
 | 1 | Pass 1, size normalisation, pass 2 (A) | done: Dice 0.9487 ens + TTA | — | — |
-| 2 | **B: polar head** | running: seed 42, `runs/nnaug_x4normpolar_s42` | — | Dice ≥ size-only (3 seeds, Wilcoxon), or radii good enough for biometry |
-| 3 | **C: landmarks** | next | landmark annotations on the 90 cases | point error small enough to define the pose |
-| 4 | **STN pose in pass 2** | after 3 (axis-supervised version possible earlier) | the landmarks of step 3 | Dice approaches the oracle pose (0.9571) |
-| 5 | **Biometry** | last | the clinical measurements of the exams, if available | agreement (Bland-Altman) within the clinical inter-observer range |
+| 2 | **B: landmarks** | next | landmark annotations on the 90 cases | point error small enough to define the pose |
+| 3 | **STN pose in pass 2** | after 2 (axis-supervised version possible earlier) | the landmarks of step 2 | Dice approaches the oracle pose (0.9571) |
+| 4 | **Biometry** | last | the clinical measurements of the exams, if available | agreement (Bland-Altman) within the clinical inter-observer range |
 
-Each step is reported as an ablation against the previous one: size only, + polar,
-+ landmarks, + pose.
+Each step is reported as an ablation against the previous one: size only, + landmarks,
++ pose.
 
 ## Open questions
 
@@ -74,9 +71,9 @@ Each step is reported as an ablation against the previous one: size only, + pola
   pellucidi, cerebellum, falx anterior/posterior, orbits?), and who annotates them.
 - **The two groups of labels** (UID-named vs patient-named files) put the head's boundary
   ~0.5 mm apart (`size_normalization_approach/evaluation/pass1_error_results.md`); this
-  lands directly in BPD and HC, so it has to be settled before step 5.
-- **Cut heads** (80 of 90 leave the sector): the polar head and the landmarks are the way
-  to complete the shape for biometry, but the labels stop at the sector's edge, so
-  completion needs its own supervision (e.g. cutting the 7 whole heads artificially).
+  lands directly in BPD and HC, so it has to be settled before step 4.
+- **Cut heads** (80 of 90 leave the sector): biometry needs the shape completed beyond the
+  sector, but the labels stop at the sector's edge, so completion needs its own
+  supervision (e.g. cutting the 7 whole heads artificially).
 - **Validation outside our labels**: the 30 unlabelled volumes as an external test, and a
   blind re-annotation of ~10 cases for the annotation's own repeatability.
