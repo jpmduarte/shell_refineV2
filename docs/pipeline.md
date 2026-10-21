@@ -49,38 +49,38 @@ Shared building blocks (caches, SDF, augmentation, model, geometry) are at the r
 
 Every scan is read once and stored as plain numpy arrays, so training never touches NIfTI.
 
-- **Loading pipeline**, [common/image_cache.py:32](../common/image_cache.py#L32). Each volume is reoriented to RAS
+- **Loading pipeline**, [common/image_cache.py:24](../common/image_cache.py#L24). Each volume is reoriented to RAS
   (flips and axis swaps only, nothing interpolated, applied to image *and* label so they
   stay aligned), made contiguous (the flips leave slow negative-stride views), and the
   image is z-scored. *Why:* one fixed orientation and intensity scale for every scan,
   whatever the scanner wrote in the header.
-- **Two resolutions**, [common/image_cache.py:29](../common/image_cache.py#L29): native (x1, 0.4 mm) and x4
+- **Two resolutions**, [common/image_cache.py:20](../common/image_cache.py#L20): native (x1, 0.4 mm) and x4
   (1.6 mm). x4 is what the network sees; x1 is what we evaluate at. *Why x4:* a whole head
   fits in 96³ voxels, so the network sees all of it at once with no tiling. At 3.2 mm (x8)
   small heads became unstable; at 1.6 mm they did not.
-- **The label is never resampled**, [common/image_cache.py:85](../common/image_cache.py#L85). *Why:* resampling a
+- **The label is never resampled**, [common/image_cache.py:74](../common/image_cache.py#L74). *Why:* resampling a
   mask moves its surface; all metrics are computed against this original label.
 
 ## 2. The target, a signed distance field: `common/sdf_targets.py`
 
-- **`signed_distance_mm`**, [common/sdf_targets.py:32](../common/sdf_targets.py#L32): for every voxel, the
+- **`signed_distance_mm`**, [common/sdf_targets.py:25](../common/sdf_targets.py#L25): for every voxel, the
   exact Euclidean distance in mm to the surface, positive outside and negative inside,
   computed on the native label with the case's own spacing.
-- **Truncated to ±10 mm and scaled to [-1, 1]**, [common/sdf_targets.py:44](../common/sdf_targets.py#L44).
+- **Truncated to ±10 mm and scaled to [-1, 1]**, [common/sdf_targets.py:33](../common/sdf_targets.py#L33).
 - *Why an SDF instead of a mask:* a mask says only inside/outside; on a 1.6 mm grid that
   quantises the surface to whole voxels. A distance field varies smoothly, so the zero
   crossing (the surface) can fall *between* voxels, and interpolating it back to 0.4 mm
   keeps that sub-voxel position. *Why truncate:* far from the head the exact distance says
   nothing about where the surface is, and would dominate the loss.
-- **The untruncated mm version**, [common/sdf_targets.py:101](../common/sdf_targets.py#L101) (`sdf/x4mm`).
+- **The untruncated mm version**, [common/sdf_targets.py:86](../common/sdf_targets.py#L86) (`sdf/x4mm`).
   *Why:* the augmentation zooms volumes, and zooming by k multiplies every distance by k.
   A field already clipped at 10 mm cannot be rescaled correctly, so the augmentation works
-  on the mm field and truncates afterwards ([common/augmentation.py:154](../common/augmentation.py#L154)).
+  on the mm field and truncates afterwards ([common/augmentation.py:162](../common/augmentation.py#L162)).
 
 ## 3. The folds: `common/folds.py`
 
-- **Grouped by patient**, [common/folds.py:28](../common/folds.py#L28) and
-  [common/folds.py:36](../common/folds.py#L36). 90 volumes come from 82 patients; scans of the same
+- **Grouped by patient**, [common/folds.py:19](../common/folds.py#L19) and
+  [common/folds.py:25](../common/folds.py#L25). 90 volumes come from 82 patients; scans of the same
   fetus are always in the same fold. *Why:* two scans of one fetus are nearly the same
   image, so one in training and one in validation would inflate the score.
 - Saved once in `splits.json` and reused by every run, so all numbers compare like for
@@ -108,12 +108,12 @@ has to cope with heads of very different sizes, and the smallest are rare.
   canonical size that any fixed value serves as long as training and testing share it.
   Deliberately kept, so the comparison with nnU-Net is like for like.
 - **The image and both SDF targets are resampled to that grid**,
-  [size_normalization/build_cache.py:123](../size_normalization/build_cache.py#L123) and saved with their own affine
-  ([size_normalization/build_cache.py:128](../size_normalization/build_cache.py#L128)). The affine records the spacing, so a
+  [size_normalization/build_cache.py:78](../size_normalization/build_cache.py#L78) and saved with their own affine
+  ([size_normalization/build_cache.py:122](../size_normalization/build_cache.py#L122)). The affine records the spacing, so a
   prediction can always be carried back to native.
-- **Links instead of copies**, [size_normalization/build_cache.py:93](../size_normalization/build_cache.py#L93): `x1`, `label` and
+- **Links instead of copies**, [size_normalization/build_cache.py:36](../size_normalization/build_cache.py#L36): `x1`, `label` and
   `sdf/x1` point to `caches/cache/`, so prediction and evaluation read the new cache unchanged.
-- **The 96³ cap**, [size_normalization/build_cache.py:117](../size_normalization/build_cache.py#L117). Training batches need every
+- **The 96³ cap**, [size_normalization/build_cache.py:81](../size_normalization/build_cache.py#L81). Training batches need every
   scan to fit 96 voxels per axis, and enlarging a small head enlarges its whole scan. A
   case that would not fit is coarsened just enough. It happened once in 90, by 1%.
   Deployment does not cap (section 8).
@@ -124,44 +124,44 @@ has to cope with heads of very different sizes, and the smallest are rare.
 
 ## 5. The network: `common/model.py`
 
-- **3D U-Net**, [common/model.py:39](../common/model.py#L39): three pooling levels
-  ([common/model.py:17](../common/model.py#L17)), 16 → 32 → 64 channels, a 128-channel bottleneck
-  ([common/model.py:56](../common/model.py#L56)), skip connections, 1.40 M parameters.
-- **Building block**, [common/model.py:22](../common/model.py#L22): two 3×3×3 convolutions with batch
+- **3D U-Net**, [common/model.py:37](../common/model.py#L37): three pooling levels
+  ([common/model.py:14](../common/model.py#L14)), 16 → 32 → 64 channels, a 128-channel bottleneck
+  ([common/model.py:50](../common/model.py#L50)), skip connections, 1.40 M parameters.
+- **Building block**, [common/model.py:18](../common/model.py#L18): two 3×3×3 convolutions with batch
   norm and ReLU. nnU-Net's instance norm and leaky ReLU were tried and were worse here.
-- **Output**: a 1×1×1 convolution and `tanh` ([common/model.py:83](../common/model.py#L83)), matching
+- **Output**: a 1×1×1 convolution and `tanh` ([common/model.py:60](../common/model.py#L60)), matching
   the SDF's [-1, 1] range.
 - *Why this small:* at x4 with normalised heads the task is narrow. A fourth level
   (5.6 M parameters) gave nothing. The same architecture serves both passes.
 
 ## 6. Training: `size_normalization/train.py`, `size_normalization/dataset.py`, `common/augmentation.py`, `common/loss.py`
 
-- **Data**, [dataset.py:28](../size_normalization/dataset.py#L28): each item is the x4 image and
-  its SDF, padded at the far end of each axis to 96³ ([common/augmentation.py:32](../common/augmentation.py#L32)).
+- **Data**, [dataset.py:22](../size_normalization/dataset.py#L22): each item is the x4 image and
+  its SDF, padded at the far end of each axis to 96³ ([common/augmentation.py:28](../common/augmentation.py#L28)).
   Image padding is 0 (background after z-scoring); SDF padding is +1 (outside), because 0
   would create a fake surface.
 - **Augmentation: nnU-Net's, adapted to an SDF**, in the shared root module so every
-  approach can use it: [common/augmentation.py:139](../common/augmentation.py#L139).
-  Mirroring ([common/augmentation.py:57](../common/augmentation.py#L57)), rotation and scaling
-  ([common/augmentation.py:71](../common/augmentation.py#L71)), then noise, blur, brightness, contrast,
-  low resolution and gamma ([common/augmentation.py:108](../common/augmentation.py#L108)): the same
+  approach can use it: [common/augmentation.py:150](../common/augmentation.py#L150).
+  Mirroring ([common/augmentation.py:69](../common/augmentation.py#L69)), rotation and scaling
+  ([common/augmentation.py:76](../common/augmentation.py#L76)), then noise, blur, brightness, contrast,
+  low resolution and gamma ([common/augmentation.py:130](../common/augmentation.py#L130)): the same
   transforms, probabilities and ranges as nnU-Net v2. Two adaptations: the SDF is
   interpolated linearly and divided by the zoom factor, because distances scale with
   the image. *Why nnU-Net's:* it is the reference we compare against, and adopting its
   augmentation was a clear gain over our earlier simple one.
-- **Loss**, [train.py:46](../size_normalization/train.py#L46): L1 on the SDF + 0.5 × a
-  **surface-weighted L1** ([common/loss.py:16](../common/loss.py#L16)), whose weight is
-  `exp(-distance / 1.5 mm)` ([common/loss.py:19](../common/loss.py#L19)). *Why:* most voxels are far from
+- **Loss**, [train.py:55](../size_normalization/train.py#L55): L1 on the SDF + 0.5 × a
+  **surface-weighted L1** ([common/loss.py:10](../common/loss.py#L10)), whose weight is
+  `exp(-distance / 1.5 mm)` ([common/loss.py:18](../common/loss.py#L18)). *Why:* most voxels are far from
   the surface, where the target is a flat ±1; plain L1 spends its gradient there. The
   weighting concentrates it on the boundary. It was the largest single gain (+0.0030 Dice).
 - **Optimiser**: Adam, lr 5e-4, cosine decay to 0 over 500 epochs
-  ([train.py:183](../size_normalization/train.py#L183)), batch 4.
-- **Checkpoint: the last epoch**, [train.py:220](../size_normalization/train.py#L220). Validation is
+  ([train.py:194](../size_normalization/train.py#L194)), batch 4.
+- **Checkpoint: the last epoch**, [train.py:226](../size_normalization/train.py#L226). Validation is
   logged for curves only. *Why:* picking the best epoch on the validation fold is picking on
   the test data; that inflated Dice by 0.0024 before we stopped. Choosing it without the test data, on an
   inner validation set held out of training (`--inner-val 5`), is no better than the last
   epoch (−0.0004, p = 0.34; results.md).
-- **Seeds**, [train.py:135](../size_normalization/train.py#L135): a seed fixes weights, batch order,
+- **Seeds**, [train.py:170](../size_normalization/train.py#L170): a seed fixes weights, batch order,
   augmentation and GPU kernels; a seeded run reproduces bit for bit. Every result is the
   per-case mean of 3 seeds (42, 43, 44), because one seed's noise (~0.002 Dice) is as large
   as most of the effects we measure.
@@ -175,9 +175,9 @@ has to cope with heads of very different sizes, and the smallest are rare.
   size-normalised method; several `--checkpoint` form the ensemble; `--tta` adds the 8
   mirrorings; `--oracle` uses the label's volume. The SDF is resampled to native, not a
   mask, so the surface keeps its sub-voxel position. Outside the scan the SDF is +1.
-- **Evaluate**, [evaluate.py:32](../size_normalization/evaluation/evaluate.py#L32): mask = SDF < 0, scored
-  against the original label: Dice, HD95 and ASD in mm ([common/metrics.py:33](../common/metrics.py#L33),
-  [common/metrics.py:52](../common/metrics.py#L52), [common/metrics.py:61](../common/metrics.py#L61)). nnU-Net's
+- **Evaluate**, [evaluate.py:24](../size_normalization/evaluation/evaluate.py#L24): mask = SDF < 0, scored
+  against the original label: Dice, HD95 and ASD in mm ([common/metrics.py:30](../common/metrics.py#L30),
+  [common/metrics.py:55](../common/metrics.py#L55), [common/metrics.py:64](../common/metrics.py#L64)). nnU-Net's
   predictions were scored by the same functions against the same labels.
 
 ## 8. The method at inference: `size_normalization/infer.py`

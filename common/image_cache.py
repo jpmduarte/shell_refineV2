@@ -1,78 +1,64 @@
-# Builds the image cache every other script reads.
-#
-#     python common/image_cache.py --images-dir <NIfTI images> --labels-dir <NIfTI labels>
-#
-# For each case it writes
-#     caches/cache/x1/<case>.npz      the image at native resolution (0.4 mm), with its affine
-#     caches/cache/x4/<case>.npz      the image at 4x the native spacing (1.6 mm)
-#     caches/cache/label/<case>.npz   the label at native resolution, never resampled
-#
-# Every volume is reoriented to RAS and the image is z-scored (zero mean, unit std).
+"""Build the image cache every other script reads: x1 (native), x4 (the network's grid) and label.
 
+Every volume is reoriented to RAS and the image is z-scored over the whole volume.
+"""
 import argparse
 import glob
 import os
-import sys
 import time
 import warnings
 
 import numpy as np
+from monai.transforms import (Compose, EnsureChannelFirstd, Lambdad, LoadImaged,
+                              NormalizeIntensityd, Orientationd)
 
-# MONAI warns about deprecated defaults on every load; the defaults used here are checked.
-warnings.filterwarnings("ignore", category=UserWarning)
+from common.geometry import FACTOR, downsample
+from common.paths import NATIVE_CACHE
 
-from monai.transforms import (Compose, EnsureChannelFirstd, Lambdad,  # noqa: E402
-                              LoadImaged, NormalizeIntensityd, Orientationd)
+warnings.filterwarnings("ignore", category=UserWarning)   # MONAI's deprecation notices; the defaults used are checked
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # the repository root
-from common.paths import NATIVE_CACHE  # noqa: E402
-from common.geometry import downsample  # noqa: E402
+FACTORS = (1, FACTOR)   # the resolutions cached
+KEYS = ["image", "label"]
+NIFTI_SUFFIXES = ("_0000.nii.gz", ".nii.gz")   # "_0000" is nnU-Net's channel suffix
 
-# The resolutions cached: native (x1) and the network's grid (x4).
-FACTORS = (1, 4)
-
-# Loading pipeline shared by image and label.
 PREPROCESS = Compose([
-    # Read the NIfTI files.
-    LoadImaged(keys=["image", "label"]),
-    # Add the channel axis MONAI expects: (1, X, Y, Z).
-    EnsureChannelFirstd(keys=["image", "label"]),
-    # Reorient both to RAS. It is only flips and axis swaps, so nothing is interpolated,
-    # and it must be applied to the label too or the two would no longer line up.
-    # labels=None reads the axis names from the image header (MONAI's new default);
-    # checked identical on an LPS and a RAS case.
-    Orientationd(keys=["image", "label"], axcodes="RAS", labels=None),
-    # The flips leave a view with negative strides, which makes every later pass ~100x
-    # slower; make the arrays contiguous again.
-    Lambdad(keys=["image", "label"], func=lambda t: t.contiguous()),
-    # Z-score the image over the whole volume.
+    LoadImaged(keys=KEYS),
+    EnsureChannelFirstd(keys=KEYS),
+    # Only flips and axis swaps, so nothing is interpolated; labels=None reads the axis names from the header.
+    Orientationd(keys=KEYS, axcodes="RAS", labels=None),
+    # The flips leave negative strides, which make every later pass ~100x slower.
+    Lambdad(keys=KEYS, func=lambda t: t.contiguous()),
     NormalizeIntensityd(keys=["image"]),
 ])
 
 
-# The case id is the file name without its extension (and without nnU-Net's "_0000"
-# channel suffix, when present).
 def case_id(path):
     name = os.path.basename(path)
-    for suffix in ("_0000.nii.gz", ".nii.gz"):
+    for suffix in NIFTI_SUFFIXES:
         if name.endswith(suffix):
             return name[:-len(suffix)]
     return name
 
 
-# Save one volume and its affine. Uncompressed on purpose: compressing z-scored speckle
-# took 3.3 s per case to save 7% of the space.
 def save(path, key, tensor):
-    np.savez(path, **{key: np.asarray(tensor[0].cpu())},
-             affine=np.asarray(tensor.affine.cpu()))
+    """Uncompressed on purpose: compressing z-scored speckle cost 3.3 s per case for 7% of the space."""
+    without_channel = tensor[0]
+    np.savez(path, **{key: np.asarray(without_channel.cpu())}, affine=np.asarray(tensor.affine.cpu()))
+
+
+def labelled_pairs(images_dir, labels_dir):
+    """Every image with the label of the same case; images without a label are skipped."""
+    labels = {case_id(p): p for p in glob.glob(os.path.join(labels_dir, "*.nii.gz"))}
+    images = sorted(glob.glob(os.path.join(images_dir, "*.nii.gz")))
+    return [{"image": p, "label": labels[case_id(p)]} for p in images if case_id(p) in labels]
+
+
+def shape_text(tensor):
+    return "x".join(map(str, tensor.shape[1:]))
 
 
 def build(images_dir, labels_dir, out_dir, factors=FACTORS, limit=0):
-    # Pair every image with the label of the same case; images without a label are skipped.
-    labels = {case_id(p): p for p in glob.glob(os.path.join(labels_dir, "*.nii.gz"))}
-    pairs = [{"image": p, "label": labels[case_id(p)]}
-             for p in sorted(glob.glob(os.path.join(images_dir, "*.nii.gz")))
-             if case_id(p) in labels]
+    pairs = labelled_pairs(images_dir, labels_dir)
     if limit:
         pairs = pairs[:limit]
     print(f"{len(pairs)} labelled cases -> {out_dir}\n", flush=True)
@@ -81,51 +67,48 @@ def build(images_dir, labels_dir, out_dir, factors=FACTORS, limit=0):
         os.makedirs(os.path.join(out_dir, name), exist_ok=True)
 
     for i, pair in enumerate(pairs, start=1):
-        t0 = time.time()
+        start = time.time()
         cid = case_id(pair["image"])
         item = PREPROCESS(pair)
 
-        # The label is stored as a binary mask, at native resolution only.
-        save(os.path.join(out_dir, "label", f"{cid}.npz"), "label",
-             (item["label"] > 0).byte())
+        binary_label = (item["label"] > 0).byte()   # native resolution only, never resampled
+        save(os.path.join(out_dir, "label", f"{cid}.npz"), "label", binary_label)
 
-        # The image at every cached resolution.
         sizes = []
         for factor in sorted(factors):
             down = downsample(item, factor) if factor > 1 else item
             save(os.path.join(out_dir, f"x{factor}", f"{cid}.npz"), "img", down["image"])
-            sizes.append(f"x{factor}={'x'.join(map(str, down['image'].shape[1:]))}")
+            sizes.append(f"x{factor}={shape_text(down['image'])}")
 
-        print(f"[{i}/{len(pairs)}] {cid[:44]:<44} {time.time() - t0:5.1f}s  "
+        print(f"[{i}/{len(pairs)}] {cid[:44]:<44} {time.time() - start:5.1f}s  "
               f"{'  '.join(sizes)}", flush=True)
 
     print(f"\n{len(pairs)} cases cached")
 
 
-# Read a cached image at one resolution: returns (array, affine).
 def load(cache_dir, cid, factor):
-    d = np.load(os.path.join(cache_dir, f"x{factor}", f"{cid}.npz"))
-    return d["img"], d["affine"]
+    """A cached image at one resolution: (array, affine)."""
+    data = np.load(os.path.join(cache_dir, f"x{factor}", f"{cid}.npz"))
+    return data["img"], data["affine"]
 
 
-# Read a cached label: returns (array, affine).
 def load_label(cache_dir, cid):
-    d = np.load(os.path.join(cache_dir, "label", f"{cid}.npz"))
-    return d["label"], d["affine"]
+    """A cached label, (D, H, W) at native resolution: (array, affine)."""
+    data = np.load(os.path.join(cache_dir, "label", f"{cid}.npz"))
+    return data["label"], data["affine"]
 
 
-# Every case id in a cache, sorted.
 def case_ids(cache_dir):
-    return sorted(os.path.basename(p)[:-4]
-                  for p in glob.glob(os.path.join(cache_dir, "x1", "*.npz")))
+    names = glob.glob(os.path.join(cache_dir, "x1", "*.npz"))
+    return sorted(os.path.splitext(os.path.basename(p))[0] for p in names)
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(description="Build the image and label cache.")
-    p.add_argument("--images-dir", required=True)
-    p.add_argument("--labels-dir", required=True)
-    p.add_argument("--out-dir", default=NATIVE_CACHE)
-    p.add_argument("--factors", type=int, nargs="+", default=list(FACTORS))
-    p.add_argument("--limit", type=int, default=0, help="only the first N cases (testing)")
-    a = p.parse_args()
-    build(a.images_dir, a.labels_dir, a.out_dir, tuple(a.factors), a.limit)
+    parser = argparse.ArgumentParser(
+        description="Build the image and label cache: <out-dir>/x1, x4 and label, one .npz per case.")
+    parser.add_argument("--images-dir", required=True)
+    parser.add_argument("--labels-dir", required=True)
+    parser.add_argument("--out-dir", default=NATIVE_CACHE)
+    parser.add_argument("--limit", type=int, default=0, help="only the first N cases (testing)")
+    args = parser.parse_args()
+    build(args.images_dir, args.labels_dir, args.out_dir, limit=args.limit)

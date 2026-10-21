@@ -1,66 +1,70 @@
-# Evaluation metrics.
-#
-# On the SDF itself (used during training):  mae, dice_from_sdf, boundary_dice_from_sdf
-# On binary masks at native resolution:      dice, hd95, asd (surface distances in mm)
-
+"""Metrics on the SDF (training: mae, dice_from_sdf, boundary_dice_from_sdf) and on masks (dice, hd95, asd)."""
 import numpy as np
 import torch
 from monai.metrics import compute_average_surface_distance, compute_hausdorff_distance
 
+from common.geometry import add_batch_axes
+from common.sdf_targets import TRUNC_MM
 
-# Mean absolute error between two fields.
+BOUNDARY_BAND_MM = 5.0
+
+
 def mae(pred: torch.Tensor, target: torch.Tensor) -> float:
     return torch.mean(torch.abs(pred - target)).item()
 
 
-# Dice between the regions where each SDF is negative (inside the head).
 def dice_from_sdf(pred: torch.Tensor, target: torch.Tensor) -> float | None:
+    """Dice between the regions where each SDF is negative."""
     return dice((pred < 0).float(), (target < 0).float())
 
 
-# Dice counted only within band_mm of the true surface. Whole-volume Dice is diluted by
-# the large, easy interior and exterior; this follows the boundary alone. Training logs it.
 def boundary_dice_from_sdf(pred: torch.Tensor, target: torch.Tensor,
-                           band_mm: float = 5.0, trunc_mm: float = 10.0) -> float | None:
+                           band_mm: float = BOUNDARY_BAND_MM, trunc_mm: float = TRUNC_MM) -> float | None:
+    """Dice within band_mm of the true surface, which whole-volume Dice dilutes with the easy interior."""
     band = (target.abs() < (band_mm / trunc_mm))
     if band.sum() == 0:
         return None
     return dice((pred < 0).float()[band], (target < 0).float()[band])
 
 
-# Dice between two masks (values >= threshold count as inside). None when both are empty:
-# 0/0 is undefined, not a score of 0.
 def dice(pred: torch.Tensor, target: torch.Tensor, threshold: float = 0.5) -> float | None:
-    pred_bin   = (pred   >= threshold).float()
+    """Dice of two soft masks thresholded; None when both are empty (0/0 is undefined, not 0)."""
+    pred_bin = (pred >= threshold).float()
     target_bin = (target >= threshold).float()
 
     intersection = (pred_bin * target_bin).sum().item()
-    total        = pred_bin.sum().item() + target_bin.sum().item()
+    total = pred_bin.sum().item() + target_bin.sum().item()
 
     if total == 0:
         return None
     return (2.0 * intersection) / total
 
 
-# MONAI's metrics expect a (batch, channel, ...) tensor.
+def mask_dice(a, b, if_both_empty: float = float("nan")) -> float:
+    """Dice of two boolean masks, numpy or torch."""
+    total = a.sum() + b.sum()
+    if total == 0:
+        return if_both_empty
+    return float(2 * (a & b).sum() / total)
+
+
 def _as_batch(mask: np.ndarray) -> torch.Tensor:
-    return torch.from_numpy(mask.astype(np.float32))[None, None]
+    return add_batch_axes(torch.from_numpy(mask.astype(np.float32)))
 
 
-# 95th-percentile Hausdorff distance in mm. None if either mask is empty (MONAI would
-# return inf or nan, which would silently corrupt an average).
 def hd95(pred: np.ndarray, target: np.ndarray, spacing) -> float | None:
+    """95th-percentile Hausdorff distance in mm; None if either mask is empty (MONAI would give inf or nan)."""
     if not pred.any() or not target.any():
         return None
-    d = compute_hausdorff_distance(_as_batch(pred), _as_batch(target),
-                                    include_background=True, percentile=95, spacing=spacing)
-    return float(d.item())
+    distance = compute_hausdorff_distance(_as_batch(pred), _as_batch(target),
+                                          include_background=True, percentile=95, spacing=spacing)
+    return float(distance.item())
 
 
-# Average symmetric surface distance in mm. None if either mask is empty.
 def asd(pred: np.ndarray, target: np.ndarray, spacing) -> float | None:
+    """Average symmetric surface distance in mm; None if either mask is empty."""
     if not pred.any() or not target.any():
         return None
-    d = compute_average_surface_distance(_as_batch(pred), _as_batch(target),
-                                          include_background=True, symmetric=True, spacing=spacing)
-    return float(d.item())
+    distance = compute_average_surface_distance(_as_batch(pred), _as_batch(target),
+                                                include_background=True, symmetric=True, spacing=spacing)
+    return float(distance.item())

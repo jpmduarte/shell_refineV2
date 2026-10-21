@@ -11,7 +11,7 @@ grouped by patient) are in [results.md](results.md); how each step works and why
 
 | Folder | What it holds |
 |---|---|
-| `common/` | Building blocks shared by both methods: the image and SDF caches, the folds, geometry (resampling), the U-Net, losses, metrics, the training augmentation |
+| `common/` | Building blocks shared by both methods: the image and SDF caches, the folds, geometry (resampling), the U-Net, losses, metrics, the training augmentation, seeding, the data paths |
 | `size_normalization/` | The main method: its training cache, training, inference (`infer.py`), deployment on a new scan (`deploy/`), and every evaluation with its results (`evaluation/`) |
 | `boundary_refiner/` | A second version: a refiner at native resolution on top of a first network's prediction. Tested and not kept (no gain at 10–30× the cost) |
 | `scripts/` | Inference and SDF benchmarks, GPU memory probe, resource profiler, the local job queue |
@@ -26,7 +26,15 @@ tracked so every run uses the same folds. All these paths are defined once, in
 ## Running
 
 Python with PyTorch, MONAI, nibabel, SciPy, NumPy and psutil (the conda environment
-`fetal-head`). Every script runs from the repository root.
+`fetal-head`). The three folders of code are one installable package, so `from common...`
+works from anywhere; install it once, editable, so changes to the code apply right away:
+
+```
+pip install -e . --no-deps
+```
+
+The commands below run from the repository root. Each script's `--help` shows its options
+and examples.
 
 ```
 # caches, once

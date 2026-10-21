@@ -48,3 +48,5 @@ Thumbs.db
 boundary_refiner/runs/
 boundary_refiner/crops/
 boundary_refiner/priors/
+*.egg-info/
+build/

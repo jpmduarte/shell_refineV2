@@ -1,71 +1,54 @@
-# Training data: each case's x4 image and its SDF target, padded to a 96^3 cube.
-#
-# Each case keeps its own isotropic grid (its shape varies with the scan and, after size
-# normalisation, with the head), so cases are padded to the cube, never resized or
-# cropped; size_normalization/build_cache.py guarantees they fit.
-#
-# Training cases go through the nnU-Net's augmentation, adapted to an SDF target
-# (../nnunet_augmentation.py).
-
+"""Training data: each case's x4 image and SDF target, padded to the 96^3 cube (never resized or cropped)."""
 import os
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from common.image_cache import load as load_image  # noqa: E402
-from common.geometry import CUBE, FACTOR  # noqa: E402
-from common.sdf_targets import load as load_sdf, load_mm as load_sdf_mm  # noqa: E402
-from common.augmentation import augment_nnunet, pad_to_cube  # noqa: E402
+from common.augmentation import SCALE_P, SCALE_RANGE, augment_nnunet, pad_to_cube
+from common.geometry import CUBE, FACTOR
+from common.image_cache import load as load_image
+from common.sdf_targets import load as load_sdf, load_mm as load_sdf_mm
+
+IMAGE_PAD = 0.0   # the z-scored mean, not the background (-0.6 to -0.8); inference pads alike, so keep it
+
+SDF_PAD = 1.0   # outside: 0 would put a fake surface along the padding
 
 
-# (image, SDF) pairs from cache_dir/x4 and cache_dir/sdf/x4 (or sdf/x4mm when augmenting),
-# each of shape (1, 96, 96, 96). `factor` and `cube` pick another grid (the resolution
-# study: x8 in 48^3, x2 in 192^3).
+def add_channel_axis(volume: np.ndarray) -> torch.Tensor:
+    return torch.from_numpy(volume[np.newaxis].astype(np.float32))
+
+
 class SDFDataset(Dataset):
+    """(image, SDF) pairs of shape (1, 96, 96, 96) from <cache>/x4 and <cache>/sdf/x4 (sdf/x4mm when augmenting)."""
 
-    def __init__(self, cache_dir: str, case_ids: list[str], augment: bool = False,
-                 seed: int = None, factor: int = FACTOR, cube: int = CUBE,
-                 scale_p: float = 0.2, scale_range: tuple = (0.7, 1.4)):
+    def __init__(self, cache_dir: str, case_ids: list[str], augment: bool = False, seed: int = None,
+                 scale_p: float = SCALE_P, scale_range: tuple = SCALE_RANGE):
         self.cache_dir = cache_dir
-        self.case_ids  = case_ids
-        self.augment   = augment
-        self.factor    = factor
-        self.cube      = cube
-        # The augmentation's scaling: probability and range (nnU-Net's by default).
+        self.case_ids = case_ids
+        self.augment = augment
         self.scale_p, self.scale_range = scale_p, tuple(scale_range)
-        mm_dir = os.path.join(cache_dir, "sdf", f"x{factor}mm")
+        mm_dir = os.path.join(cache_dir, "sdf", f"x{FACTOR}mm")
         if augment and not os.path.isdir(mm_dir):
             raise ValueError(f"augmentation needs the untruncated field {mm_dir} "
                              f"(common/sdf_targets.py --untruncated, or size_normalization/build_cache.py)")
-        # The random generator for augmentation. With several loader workers, train.py
-        # (seed_worker) gives each worker its own.
-        self._rng = np.random.default_rng(seed)
+        self._rng = np.random.default_rng(seed)   # replaced per loader worker by seeding.seed_worker
 
     def __len__(self) -> int:
         return len(self.case_ids)
 
     def __getitem__(self, idx: int):
         cid = self.case_ids[idx]
-        img, _ = load_image(self.cache_dir, cid, self.factor)
+        img, _ = load_image(self.cache_dir, cid, FACTOR)
         img = img.astype(np.float32)
 
         if self.augment:
-            sdf_mm, _ = load_sdf_mm(self.cache_dir, cid, self.factor)
-            img, sdf = augment_nnunet(img, sdf_mm.astype(np.float32), self._rng, self.cube,
+            sdf_mm, _ = load_sdf_mm(self.cache_dir, cid, FACTOR)
+            img, sdf = augment_nnunet(img, sdf_mm.astype(np.float32), self._rng, CUBE,
                                       scale_p=self.scale_p, scale_range=self.scale_range)
         else:
-            sdf, _ = load_sdf(self.cache_dir, cid, self.factor)
-            # Pad the image with 0 and the SDF with +1 (outside; 0 would put a fake surface
-            # along the padding). 0 is the z-scored volume's mean, not its background: about
-            # half of each x4 volume is background, at -0.6 to -0.8, so the padding (like
-            # the rotation fill in common/augmentation.py) makes a step edge. Training and
-            # inference (infer.py) both pad with 0, so they agree; changing it would mean
-            # retraining.
-            img = pad_to_cube(img, self.cube, cval=0.0)
-            sdf = pad_to_cube(sdf.astype(np.float32), self.cube, cval=1.0)
+            sdf, _ = load_sdf(self.cache_dir, cid, FACTOR)
+            img = pad_to_cube(img, CUBE, cval=IMAGE_PAD)
+            sdf = pad_to_cube(sdf.astype(np.float32), CUBE, cval=SDF_PAD)
 
-        # Add the channel axis: (1, D, H, W).
-        x = img[np.newaxis].astype(np.float32)
-        y = sdf[np.newaxis].astype(np.float32)
-        return torch.from_numpy(x), torch.from_numpy(y)
+        return add_channel_axis(img), add_channel_axis(sdf)

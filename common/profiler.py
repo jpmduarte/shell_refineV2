@@ -1,15 +1,9 @@
-# A minimal profiler for training and prediction: wall time, peak GPU memory, RAM and CPU
-# per named span, printed as a table at the end.
-#
-#     prof = Profiler("train")
-#     with prof:
-#         for epoch in range(epochs):
-#             with prof.span("train_epoch") as s:
-#                 ...
-#                 s["items"] = n_cases      # optional: gives a throughput
-#
-# It reads PyTorch's own memory counters and psutil at the start and end of each span;
-# nothing runs in the background.
+"""Wall time, peak GPU memory, RAM and CPU per named span, read at each span's ends and printed as a table.
+
+    with Profiler("train") as prof:
+        with prof.span("train_epoch") as span:
+            span["items"] = n_cases   # optional: gives a throughput
+"""
 
 import time
 from collections import defaultdict
@@ -17,24 +11,23 @@ from contextlib import contextmanager
 
 import torch
 
-# psutil gives RAM and CPU; without it those columns are simply left out.
-try:
+try:   # psutil gives RAM and CPU; without it those columns are left out
     import psutil
 except ImportError:
     psutil = None
 
 MB = 1024 ** 2
+FLOAT32_BYTES = 4
 
 
-# True once this process has actually used the GPU.
 def _cuda_active() -> bool:
+    """True once this process has used the GPU."""
     return torch.cuda.is_available() and torch.cuda.is_initialized()
 
 
-# Number of parameters, and their size in MB as float32.
 def model_summary(model: torch.nn.Module) -> dict:
     params = sum(p.numel() for p in model.parameters())
-    return {"params": params, "params_mb": round(params * 4 / MB, 2)}
+    return {"params": params, "params_mb": round(params * FLOAT32_BYTES / MB, 2)}
 
 
 class Profiler:
@@ -58,10 +51,10 @@ class Profiler:
         self.print_summary()
         return False
 
-    # Time one block. Yields a dict the caller can add fields to (e.g. s["items"] = n).
     @contextmanager
     def span(self, name: str, **meta):
-        # GPU work runs asynchronously: wait for it, so the timing covers this block only.
+        """Time one block; yields a dict the caller can add fields to."""
+        # GPU work runs asynchronously: wait for it so the timing covers this block only.
         if _cuda_active():
             torch.cuda.synchronize()
             torch.cuda.reset_peak_memory_stats()
@@ -81,8 +74,8 @@ class Profiler:
 
             self._spans[name].append(record)
 
-    # Per span: count, total and mean time, peak VRAM and RAM, mean CPU, throughput.
     def summary(self) -> dict:
+        """Per span: count, total and mean time, peak VRAM and RAM, mean CPU, throughput."""
         spans = {}
         for name, records in self._spans.items():
             durations = [r["duration_s"] for r in records]

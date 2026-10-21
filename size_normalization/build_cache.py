@@ -1,175 +1,136 @@
-# Builds a size-normalised copy of the x4 cache, in which every head has the same
-# apparent size.
-#
-#     python size_normalization/build_cache.py                                    # training copy -> caches/cache_norm4/
-#
-# Head volumes in the dataset range from 35 to 291 mL, so a network on a fixed grid has to
-# handle very different sizes, and the smallest heads are rare. Here each case gets its
-# own spacing, proportional to its head's linear size:
-#
-#     spacing = 4 x native spacing x (V / V0)^(1/3)
-#
-# so every head spans about the same number of voxels; a small head gets finer voxels
-# rather than fewer of them.
-#
-# V0, the canonical size, is the median head volume of the training data: computed here
-# from the labels when the training copy is built, and stored in its norm.json.
-# Inference reads it from there (reference_v0), so it comes from the data and training
-# and inference cannot disagree. --v0-ml overrides it; the existing cache was built with
-# 130 mL (the median, 128.3, rounded).
-#
-# This builds the training copy, from the true volumes (the labels). Evaluation and
-# deployment never use a normalised cache: size_normalization/infer.py
-# normalises each native image on the GPU with the volume a first pass of the plain x4
-# network estimates.
-#
-# Output layout, same as caches/cache/ so the other scripts read it unchanged:
-#     x4/, sdf/x4/, sdf/x4mm/   the normalised image and targets, each with its own affine
-#     x1/, label/, sdf/x1/      links to caches/cache/: predictions go back to the native grid
-#                               through the affine, and evaluation is untouched
-#     norm.json                 each case's volume, scale and spacing
-#
-# The 96^3 cube: training batches need every scan to fit 96 voxels per axis, and
-# enlarging a small head enlarges its whole scan. A case that would exceed 96 is
-# coarsened just enough to fit (its head ends a little below the canonical size) rather
-# than cropped. It never ends coarser than plain x4, which fits every scan. In this
-# dataset it applied once, by 1%. Inference (infer.py) does not cap: it
-# pads a larger grid to a multiple of 8 instead, which keeps the canonical size (on a scan
-# 17% too large, the cap cost 0.028 Dice).
+"""Build the size-normalised training copy of the x4 cache (caches/cache_norm4), every head at the size V0.
 
+Each case gets spacing = 4 x native spacing x (V / V0)^(1/3) from its label's volume V, so a small
+head gets finer voxels rather than fewer. V0 is the labels' median (--v0-ml overrides it; the cache
+was built with 130 mL) and is stored in norm.json, where inference reads it. Evaluation and
+deployment never use this cache: infer.py normalises each scan with pass 1's estimate.
+"""
 import argparse
 import json
 import os
 import subprocess
-import sys
 import time
 
 import numpy as np
 import torch
 from monai.data import MetaTensor
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # the repository root
-from common.paths import NATIVE_CACHE, NORM_CACHE  # noqa: E402
-from common.image_cache import case_ids, load, load_label  # noqa: E402
-from common.geometry import downsample  # noqa: E402
-from common.sdf_targets import signed_distance_mm  # noqa: E402
+from common.geometry import CUBE, FACTOR, MM3_PER_ML, downsample, isotropic_spacing, voxel_spacing
+from common.image_cache import case_ids, load, load_label
+from common.paths import NATIVE_CACHE, NORM_CACHE
+from common.sdf_targets import TRUNC_MM, signed_distance_mm
 
-# The grid normalised is x4 in a 96^3 cube (--factor: 8 and 2 for the resolution study;
-# the cube scales as 4 / factor).
-from common.geometry import CUBE, FACTOR  # noqa: E402
-from common.sdf_targets import TRUNC_MM  # noqa: E402
+CUBE_FIT_MARGIN = 1.005   # for the shape's rounding when a case is coarsened to fit the cube
+LINKED_FROM_NATIVE = ["x1", "label", os.path.join("sdf", "x1")]   # predictions go back to native via the affine
+
+LAYOUT = """\
+output, laid out like caches/cache/ so the other scripts read it unchanged:
+  x4/, sdf/x4/, sdf/x4mm/   the normalised image and targets, each with its own affine
+  x1/, label/, sdf/x1/      links to caches/cache/
+  norm.json                 V0 and each case's volume, scale and spacing
+
+A case too large for the 96^3 training cube is coarsened just enough to fit (once in this dataset,
+by 1%). Inference does not cap: it pads instead (the cap cost 0.028 Dice on a scan 17% too large)."""
 
 
-# Link a folder of caches/cache/ into the new cache instead of copying it. On Windows a junction,
-# which needs no administrator rights (a directory symlink does).
 def link(src: str, dst: str):
-    # mklink needs Windows paths: absolute, with backslashes.
-    src, dst = os.path.abspath(src), os.path.abspath(dst)
+    """A junction on Windows, which needs no administrator rights (a directory symlink does)."""
+    src, dst = os.path.abspath(src), os.path.abspath(dst)   # mklink needs absolute Windows paths
     if os.path.exists(dst):
         return
     if os.name == "nt":
-        subprocess.run(["cmd", "/c", "mklink", "/J", dst, src], check=True,
-                       stdout=subprocess.DEVNULL)
+        subprocess.run(["cmd", "/c", "mklink", "/J", dst, src], check=True, stdout=subprocess.DEVNULL)
     else:
         os.symlink(src, dst, target_is_directory=True)
 
 
-# The canonical head volume (mL) a size-normalised cache was built with.
 def reference_v0(cache_dir: str) -> float:
+    """The canonical head volume (mL) a size-normalised cache was built with."""
     with open(os.path.join(cache_dir, "norm.json")) as f:
         return float(json.load(f)["v0_ml"])
 
 
-# Head volume in mL of one case, from its label.
+def mask_volume_ml(label: np.ndarray, affine: np.ndarray):
+    return label.astype(bool).sum() * np.prod(voxel_spacing(affine)) / MM3_PER_ML
+
+
 def label_volume_ml(src: str, cid: str) -> float:
-    label, affine = load_label(src, cid)
-    spacing = np.abs(np.diag(affine[:3, :3]))
-    return float(label.astype(bool).sum() * np.prod(spacing) / 1000)
+    return float(mask_volume_ml(*load_label(src, cid)))
 
 
-# Resample a native array to `factor` times its spacing (factor need not be an integer).
-# Returns (array, affine).
 def resample(arr: np.ndarray, affine: np.ndarray, factor: float):
-    item = {"x": MetaTensor(torch.from_numpy(arr.astype(np.float32))[None],
-                            affine=torch.from_numpy(affine))}
-    out = downsample(item, factor, key="x")["x"]
-    return np.asarray(out[0].cpu(), dtype=np.float32), np.asarray(out.affine.cpu())
+    """A native array at `factor` (any real) times its spacing: (array, affine)."""
+    with_channel = MetaTensor(torch.from_numpy(arr.astype(np.float32))[None], affine=torch.from_numpy(affine))
+    resampled = downsample({"x": with_channel}, factor, key="x")["x"]
+    without_channel = resampled[0]
+    return np.asarray(without_channel.cpu(), dtype=np.float32), np.asarray(resampled.affine.cpu())
+
+
+def normalise_case(src, cid, v0):
+    """The case's image, SDF and SDF in mm on its normalised grid, that grid's affine, and its record."""
+    img, affine = load(src, cid, 1)
+    label, _ = load_label(src, cid)
+    label = label.astype(bool)
+
+    true_ml = mask_volume_ml(label, affine)
+    scale = (float(true_ml) / v0) ** (1 / 3)
+    factor = FACTOR * scale
+    img4, affine4 = resample(img, affine, factor)
+
+    largest_axis = max(img4.shape)
+    if largest_axis > CUBE:
+        factor *= largest_axis / CUBE * CUBE_FIT_MARGIN
+        scale = factor / FACTOR
+        img4, affine4 = resample(img, affine, factor)
+
+    sdf4_mm, affine_sdf = resample(signed_distance_mm(label, voxel_spacing(affine)), affine, factor)
+    assert np.allclose(affine4, affine_sdf) and img4.shape == sdf4_mm.shape, cid
+    sdf4 = np.clip(sdf4_mm, -TRUNC_MM, TRUNC_MM) / TRUNC_MM
+
+    record = {"volume_ml": float(true_ml), "true_ml": float(true_ml), "scale": scale,
+              "spacing_mm": isotropic_spacing(affine4), "shape": list(img4.shape)}
+    return img4, sdf4, sdf4_mm, affine4, record
 
 
 def main():
-    p = argparse.ArgumentParser(description="Build a size-normalised copy of the x4 cache.")
-    p.add_argument("--src", default=NATIVE_CACHE)
-    p.add_argument("--dst", default=NORM_CACHE)
-    p.add_argument("--v0-ml", type=float, default=None,
-                   help="override V0; default: the median head volume of the labels")
-    p.add_argument("--factor", type=int, default=FACTOR,
-                   help="the grid normalised, as a multiple of the native spacing (4: 1.6 mm)")
-    p.add_argument("--cube", type=int, default=None,
-                   help="the training cube per axis; default 96 x 4 / factor")
-    p.add_argument("--limit", type=int, default=0, help="only the first N cases (testing)")
-    a = p.parse_args()
-    base = a.factor
-    cube = a.cube or CUBE * FACTOR // a.factor
+    parser = argparse.ArgumentParser(description=__doc__, epilog=LAYOUT,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--src", default=NATIVE_CACHE)
+    parser.add_argument("--dst", default=NORM_CACHE)
+    parser.add_argument("--v0-ml", type=float, default=None,
+                        help="override V0; default: the median head volume of the labels")
+    parser.add_argument("--limit", type=int, default=0, help="only the first N cases (testing)")
+    args = parser.parse_args()
 
-    ids = case_ids(a.src)[:a.limit or None]
-
-    # The canonical volume V0: given, or the median of the label volumes.
-    v0 = a.v0_ml if a.v0_ml is not None else float(np.median([label_volume_ml(a.src, cid) for cid in ids]))
+    ids = case_ids(args.src)[:args.limit or None]
+    v0 = args.v0_ml if args.v0_ml is not None else float(np.median([label_volume_ml(args.src, cid) for cid in ids]))
     print(f"V0 = {v0:.1f} mL", flush=True)
 
-    xf = f"x{base}"
-    for d in (xf, os.path.join("sdf", xf), os.path.join("sdf", xf + "mm")):
-        os.makedirs(os.path.join(a.dst, d), exist_ok=True)
-    link(os.path.join(a.src, "x1"), os.path.join(a.dst, "x1"))
-    link(os.path.join(a.src, "label"), os.path.join(a.dst, "label"))
-    link(os.path.join(a.src, "sdf", "x1"), os.path.join(a.dst, "sdf", "x1"))
+    grid = f"x{FACTOR}"
+    image_dir = os.path.join(args.dst, grid)
+    sdf_dir = os.path.join(args.dst, "sdf", grid)
+    sdf_mm_dir = os.path.join(args.dst, "sdf", grid + "mm")
+    for d in (image_dir, sdf_dir, sdf_mm_dir):
+        os.makedirs(d, exist_ok=True)
+    for name in LINKED_FROM_NATIVE:
+        link(os.path.join(args.src, name), os.path.join(args.dst, name))
 
-    meta = {}
+    cases = {}
     for i, cid in enumerate(ids, start=1):
-        t0 = time.time()
-        img, affine = load(a.src, cid, 1)
-        label, _ = load_label(a.src, cid)
-        label = (label[0] if label.ndim == 4 else label).astype(bool)
-        spacing = np.abs(np.diag(affine[:3, :3]))
+        start = time.time()
+        img4, sdf4, sdf4_mm, affine4, record = normalise_case(args.src, cid, v0)
+        np.savez(os.path.join(image_dir, f"{cid}.npz"), img=img4, affine=affine4)
+        np.savez(os.path.join(sdf_dir, f"{cid}.npz"), sdf=sdf4, affine=affine4)
+        np.savez(os.path.join(sdf_mm_dir, f"{cid}.npz"), sdf=sdf4_mm, affine=affine4)
+        cases[cid] = record
+        print(f"[{i}/{len(ids)}] {cid[:44]:<44} {record['volume_ml']:6.1f} mL  spacing "
+              f"{record['spacing_mm']:.2f}mm  {'x'.join(map(str, img4.shape))}  "
+              f"{time.time() - start:4.1f}s", flush=True)
 
-        # Head volume in mL, from the label.
-        true_ml = label.sum() * np.prod(spacing) / 1000
-        vol_ml = float(true_ml)
-
-        # The linear scale between this head and the canonical one, and the resulting
-        # resampling factor relative to the native spacing.
-        scale = (vol_ml / v0) ** (1 / 3)
-        factor = base * scale
-
-        img4, affine4 = resample(img, affine, factor)
-
-        # Too large for the cube: coarsen just enough to fit (+0.5% for shape rounding).
-        if max(img4.shape) > cube:
-            factor *= max(img4.shape) / cube * 1.005
-            scale = factor / base
-            img4, affine4 = resample(img, affine, factor)
-
-        # The targets on exactly the same grid: the SDF in mm, then truncated and scaled.
-        sdf_mm = signed_distance_mm(label, spacing)
-        sdf4_mm, affine_sdf = resample(sdf_mm, affine, factor)
-        assert np.allclose(affine4, affine_sdf) and img4.shape == sdf4_mm.shape, cid
-        sdf4 = np.clip(sdf4_mm, -TRUNC_MM, TRUNC_MM) / TRUNC_MM
-
-        np.savez(os.path.join(a.dst, xf, f"{cid}.npz"), img=img4, affine=affine4)
-        np.savez(os.path.join(a.dst, "sdf", xf, f"{cid}.npz"), sdf=sdf4, affine=affine4)
-        np.savez(os.path.join(a.dst, "sdf", xf + "mm", f"{cid}.npz"), sdf=sdf4_mm, affine=affine4)
-
-        meta[cid] = {"volume_ml": vol_ml, "true_ml": float(true_ml), "scale": scale,
-                     "spacing_mm": float(np.abs(affine4[0, 0])), "shape": list(img4.shape)}
-        print(f"[{i}/{len(ids)}] {cid[:44]:<44} {vol_ml:6.1f} mL  spacing "
-              f"{np.abs(affine4[0, 0]):.2f}mm  {'x'.join(map(str, img4.shape))}  "
-              f"{time.time() - t0:4.1f}s", flush=True)
-
-    with open(os.path.join(a.dst, "norm.json"), "w") as f:
-        json.dump({"v0_ml": v0, "oracle": True, "factor": base, "cube": cube,
-                   "cases": meta}, f, indent=1)
-    shapes = np.array([m["shape"] for m in meta.values()])
-    print(f"\nlargest shape per axis {shapes.max(0)} (cube {cube})")
+    with open(os.path.join(args.dst, "norm.json"), "w") as f:
+        json.dump({"v0_ml": v0, "oracle": True, "factor": FACTOR, "cube": CUBE, "cases": cases}, f, indent=1)
+    shapes = np.array([record["shape"] for record in cases.values()])
+    print(f"\nlargest shape per axis {shapes.max(0)} (cube {CUBE})")
 
 
 if __name__ == "__main__":

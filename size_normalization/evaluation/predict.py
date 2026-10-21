@@ -1,118 +1,118 @@
-# Runs the method on cached cases and saves each predicted SDF at native resolution.
-#
-#     # the size-normalised method (pass 1 for the volume, then pass 2), as deployed:
-#     python size_normalization/evaluation/predict.py --fold 0 --out-dir <run>/fold0/preds_val \
-#         --pass1 runs/nnaug_x4e500_s42/fold0/checkpoints/phase1_last.pth \
-#         --checkpoint runs/nnaug_x4norm_s42/fold0/checkpoints/phase1_last.pth
-#     # the plain x4 method (also pass 1 on its own): no --pass1
-#     python size_normalization/evaluation/predict.py --fold 0 --out-dir ... --checkpoint <x4 run>/...
-#
-# Several --checkpoint are averaged as SDFs (the ensemble); --tta adds the 8 mirrorings;
-# --oracle normalises with the label's volume instead of pass 1's estimate (an upper bound).
-# Everything goes through infer.py, the same code segment.py and the benchmark run, from the
-# native image in caches/cache/x1.
-#
-# Output: <out-dir>/<case>.npz with
-#     sdf      the predicted SDF, normalised to [-1, 1], at native resolution
-#     affine   the native affine (the same as caches/cache/x1/<case>.npz)
-#     volume_ml, k, fallback   what pass 1 measured (size-normalised method only)
-# size_normalization/evaluation/evaluate.py scores these files.
+"""Run the method on cached cases and save each predicted SDF at native resolution, through infer.py as deployed.
 
+Output: <out-dir>/<case>.npz with sdf (normalised, native grid), affine (the native one) and, for the
+size-normalised method, what pass 1 measured (volume_ml, k, fallback). evaluate.py scores these files.
+"""
 import argparse
+import dataclasses
 import os
-import sys
 
 import numpy as np
 import torch
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))  # the repository root
-from common.paths import SPLITS_JSON, NATIVE_CACHE, NORM_CACHE  # noqa: E402
+from common.folds import SEED as FOLDS_SEED, fold_split, get_folds
+from common.geometry import CUBE, FACTOR, MM3_PER_ML, isotropic_spacing
+from common.image_cache import case_ids, load as load_image, load_label
+from common.paths import NATIVE_CACHE, NORM_CACHE, SPLITS_JSON
+from size_normalization.build_cache import reference_v0
+from size_normalization.infer import load_net, segment, segment_plain
 
-from common.image_cache import case_ids, load as load_image, load_label  # noqa: E402
-from size_normalization.infer import load_net, segment, segment_plain  # noqa: E402
-from size_normalization.build_cache import reference_v0  # noqa: E402
-from common.folds import fold_split, get_folds  # noqa: E402
+USAGE = """\
+examples:
+  the size-normalised method (pass 1 for the volume, then pass 2), as deployed:
+    python size_normalization/evaluation/predict.py --fold 0 --out-dir <run>/fold0/preds_val \\
+        --pass1 runs/nnaug_x4e500_s42/fold0/checkpoints/phase1_last.pth \\
+        --checkpoint runs/nnaug_x4norm_s42/fold0/checkpoints/phase1_last.pth
+  the plain x4 method (also pass 1 on its own): no --pass1
+    python size_normalization/evaluation/predict.py --fold 0 --out-dir ... --checkpoint <x4 run>/..."""
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description=__doc__, epilog=USAGE,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--checkpoint", type=str, nargs="+", required=True,
+                        help="the network(s); several are averaged. The size-normalised (pass 2) "
+                             "networks with --pass1, the plain method's without")
+    parser.add_argument("--pass1", type=str, default=None,
+                        help="the plain x4 network that estimates the head volume; makes this the "
+                             "size-normalised method")
+    parser.add_argument("--tta", action="store_true", help="average the 8 mirrorings")
+    parser.add_argument("--oracle", action="store_true",
+                        help="normalise with the label's head volume instead of pass 1's estimate")
+    parser.add_argument("--blend", type=float, default=0.0,
+                        help="weight of pass 1's SDF in the final one (0 = off; 0.25 tested)")
+    parser.add_argument("--reference", type=str, default=NORM_CACHE,
+                        help="the pass-2 networks' training cache: its norm.json gives V0")
+    parser.add_argument("--case", type=str, default=None, help="a single case id")
+    parser.add_argument("--all", action="store_true", help="every cached case")
+    parser.add_argument("--fold", type=int, default=None, help="one fold's cases")
+    parser.add_argument("--split", type=str, default="val", choices=["train", "val"])
+    parser.add_argument("--n-folds", type=int, default=5)
+    parser.add_argument("--splits-json", type=str, default=SPLITS_JSON)
+    parser.add_argument("--cache-dir", type=str, default=NATIVE_CACHE, help="the native cache (x1, label)")
+    parser.add_argument("--out-dir", type=str, required=True)
+    args = parser.parse_args()
+
+    if sum(x is not None for x in (args.case, args.fold)) + int(args.all) != 1:
+        parser.error("pass exactly one of --case <cid>, --all, or --fold <k>")
+    if (args.oracle or args.blend) and not args.pass1:
+        parser.error("--oracle and --blend need --pass1 (the size-normalised method)")
+    return args
+
+
+def select_cases(args) -> list[str]:
+    if args.fold is not None:
+        folds = get_folds(case_ids(args.cache_dir), n_folds=args.n_folds, seed=FOLDS_SEED,
+                          splits_json=args.splits_json)
+        train_ids, val_ids = fold_split(folds, args.fold)
+        return val_ids if args.split == "val" else train_ids
+    if args.all:
+        return case_ids(args.cache_dir)
+    return [args.case]
+
+
+def oracle_volume_ml(cache_dir, cid, aff1) -> float:
+    label, _ = load_label(cache_dir, cid)
+    return float(label.astype(bool).sum()) * isotropic_spacing(aff1) ** 3 / MM3_PER_ML
 
 
 def main():
-    p = argparse.ArgumentParser(description="Predict native-resolution SDFs with trained networks.")
-    p.add_argument("--checkpoint",  type=str, nargs="+", required=True,
-                   help="the network(s); several are averaged. The size-normalised (pass 2) "
-                        "networks with --pass1, the plain method's without")
-    p.add_argument("--pass1",       type=str, default=None,
-                   help="the plain x4 network that estimates the head volume; makes this the "
-                        "size-normalised method")
-    p.add_argument("--tta",         action="store_true", help="average the 8 mirrorings")
-    p.add_argument("--oracle",      action="store_true",
-                   help="normalise with the label's head volume instead of pass 1's estimate")
-    p.add_argument("--blend",       type=float, default=0.0,
-                   help="weight of pass 1's SDF in the final one (0 = off; 0.25 tested)")
-    p.add_argument("--reference",   type=str, default=NORM_CACHE,
-                   help="the pass-2 networks' training cache: its norm.json gives V0")
-    p.add_argument("--case",        type=str, default=None, help="a single case id")
-    p.add_argument("--all",         action="store_true", help="every cached case")
-    p.add_argument("--fold",        type=int, default=None, help="one fold's cases")
-    p.add_argument("--split",       type=str, default="val", choices=["train", "val"])
-    p.add_argument("--n-folds",     type=int, default=5)
-    p.add_argument("--splits-json", type=str, default=SPLITS_JSON)
-    p.add_argument("--cache-dir",   type=str, default=NATIVE_CACHE,
-                   help="the native cache (x1, label)")
-    p.add_argument("--out-dir",     type=str, required=True)
-    a = p.parse_args()
+    args = parse_args()
 
-    if sum(x is not None for x in (a.case, a.fold)) + int(a.all) != 1:
-        p.error("pass exactly one of --case <cid>, --all, or --fold <k>")
-    if (a.oracle or a.blend) and not a.pass1:
-        p.error("--oracle and --blend need --pass1 (the size-normalised method)")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    models = [load_net(c, device) for c in args.checkpoint]
+    if args.pass1:
+        pass1 = load_net(args.pass1, device)
+        v0_ml = reference_v0(args.reference)
+    print(f"{'size-normalised' if args.pass1 else 'plain'} method, {len(models)} network(s) on x{FACTOR} "
+          f"in {CUBE}^3, output sdf" + (", TTA" if args.tta else "")
+          + (", oracle volume" if args.oracle else ""))
 
-    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    nets = [load_net(c, dev) for c in a.checkpoint]
-    models, cfg = [m for m, _ in nets], nets[0][1]
-    if any(c != cfg for _, c in nets):
-        p.error("the --checkpoint networks were trained on different grids")
-    grid = dict(factor2=cfg["factor"], cube2=cfg["cube"], mask2=cfg["loss"] == "mask")
-    if a.pass1:
-        pass1, _ = load_net(a.pass1, dev)
-        v0_ml = reference_v0(a.reference)
-    print(f"{'size-normalised' if a.pass1 else 'plain'} method, {len(models)} network(s) on x{cfg['factor']} "
-          f"in {cfg['cube']}^3, output {cfg['loss']}" + (", TTA" if a.tta else "")
-          + (", oracle volume" if a.oracle else ""))
-
-    os.makedirs(a.out_dir, exist_ok=True)
-
-    # The cases to predict.
-    if a.fold is not None:
-        folds = get_folds(case_ids(a.cache_dir), n_folds=a.n_folds, seed=42, splits_json=a.splits_json)
-        train_ids, val_ids = fold_split(folds, a.fold)
-        cids = val_ids if a.split == "val" else train_ids
-    elif a.all:
-        cids = case_ids(a.cache_dir)
-    else:
-        cids = [a.case]
+    os.makedirs(args.out_dir, exist_ok=True)
+    cids = select_cases(args)
 
     for i, cid in enumerate(cids, start=1):
-        img1, aff1 = load_image(a.cache_dir, cid, 1)
+        img1, aff1 = load_image(args.cache_dir, cid, 1)
         img1 = np.asarray(img1, dtype=np.float32).squeeze()
-        extra = {}
-        if a.pass1:
-            volume = None
-            if a.oracle:
-                lab, _ = load_label(a.cache_dir, cid)
-                volume = float(lab.astype(bool).sum()) * float(np.abs(aff1[0, 0])) ** 3 / 1000
-            field, info = segment(img1, aff1, pass1, models, v0_ml, a.tta, dev, blend=a.blend,
-                                  volume=volume, **grid)
-            extra = info
+        pass1_record = {}
+        if args.pass1:
+            volume = oracle_volume_ml(args.cache_dir, cid, aff1) if args.oracle else None
+            field, estimate = segment(img1, aff1, pass1, models, v0_ml, args.tta, device,
+                                      blend=args.blend, volume=volume)
+            pass1_record = dataclasses.asdict(estimate)
         else:
-            field = segment_plain(img1, aff1, models, a.tta, dev, factor=grid["factor2"],
-                                  cube=grid["cube2"], mask=grid["mask2"])
+            field = segment_plain(img1, aff1, models, args.tta, device)
         sdf = field.cpu().numpy().astype(np.float32)
-        np.savez(os.path.join(a.out_dir, f"{cid}.npz"), sdf=sdf, affine=aff1, **extra)
-        print(f"[{i}/{len(cids)}] {cid[:44]:<44} native={sdf.shape}"
-              + (f"  {extra['volume_ml']:.1f} mL  k {extra['k']:.3f}"
-                 + ("  FALLBACK to pass 1" if extra["fallback"] else "") if extra else ""), flush=True)
+        np.savez(os.path.join(args.out_dir, f"{cid}.npz"), sdf=sdf, affine=aff1, **pass1_record)
+
+        line = f"[{i}/{len(cids)}] {cid[:44]:<44} native={sdf.shape}"
+        if pass1_record:
+            line += f"  {estimate.volume_ml:.1f} mL  k {estimate.k:.3f}"
+            line += "  FALLBACK to pass 1" if estimate.fallback else ""
+        print(line, flush=True)
         torch.cuda.empty_cache()
 
-    print(f"\n{len(cids)} case(s) -> {a.out_dir}")
+    print(f"\n{len(cids)} case(s) -> {args.out_dir}")
 
 
 if __name__ == "__main__":

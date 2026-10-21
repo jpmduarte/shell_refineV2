@@ -112,11 +112,12 @@ base channels (5.6 M params): 0.9433 against 0.9437 on seed 42 fold 0, then canc
 
 ## Resolution and loss (size-normalised, seed 42, 5 folds)
 
-Same network and recipe; only the grid (`--factor`) and the target (`--loss sdf|mask`)
-change. The mask arm is Dice + BCE on the head mask (nnU-Net's binary loss); its
-probability is carried to the native grid and cut at 0.5. Paired Wilcoxon against x4 SDF.
-Inference on all 90 cases, 3 repeats (`benchmark_inference.py --pass2 <the arm's runs>`; the grid
-comes from each run's config.json).
+Same network and recipe; only the grid and the target (SDF or mask) change. The mask arm
+is Dice + BCE on the head mask (nnU-Net's binary loss); its probability is carried to the
+native grid and cut at 0.5. Paired Wilcoxon against x4 SDF. Inference on all 90 cases, 3
+repeats. The options for other grids and for mask outputs have since been removed from the
+code (x4 SDF won); the runs are still in `size_normalization/runs/`, and `load_net` refuses
+them rather than score them as x4 SDF networks.
 
 | Grid | Loss | Dice | Dice + TTA | HD95 | ASD | ms, one model / + TTA |
 |---|---|---|---|---|---|---|

@@ -1,130 +1,95 @@
-# The refiner's priors: an existing phase-1 network's prediction for every case, which
-# make_crops.py (--prior-dir) then cuts the band around. The refiner trains no phase 1
-# of its own; it refines another approach's output.
-#
-#     python boundary_refiner/make_priors.py --seeds 42
-#         -> boundary_refiner/priors/x4_s42/<case>.npz
-#     python boundary_refiner/make_priors.py --seeds 42 43 44 --tta
-#         -> .../priors/x4_ens_s42-43-44_tta/   the 3-seed ensemble with TTA
-#
-# By default the networks are the plain x4 ones (size_normalization's first
-# pass, no size normalisation). Any other phase-1 networks can be used through
-# --checkpoint (a pattern with {s} and {f}) and --cache-dir (with {s} when each seed has
-# its own cache), with --out-dir. The size-normalised priors:
-#     --checkpoint "size_normalization/runs/nnaug_x4norm_s{s}/fold{f}/checkpoints/phase1_last.pth"
-#     --cache-dir "caches/cache_norm4_est_s{s}" --out-dir boundary_refiner/priors/x4norm_ens_tta
-#
-# Each file holds the predicted SDF at native resolution (sdf) and the native affine
-# (affine), the format make_crops.py and size_normalization/evaluation/evaluate.py read.
-#
-# Out-of-fold: every case is predicted by the network of the fold where it was
-# validation, so no prior comes from a network that trained on that case. Phase 2 then
-# learns to correct the errors phase 1 really makes on unseen scans, not the smaller ones
-# it makes on its own training data.
+"""The refiner's priors: a trained first-pass network's out-of-fold prediction for every case.
 
+Each case is predicted by the networks of the fold that held it out, so the refiner learns the errors
+the first pass makes on unseen scans. <out-dir>/<case>.npz holds the native SDF and affine, the format
+make_crops.py and size_normalization/evaluation/evaluate.py read. Several --seeds are averaged.
+"""
 import argparse
-import itertools
 import os
-import sys
 import zipfile
 
 import numpy as np
 import torch
 from numpy.lib import format as npy_format
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # the repository root
-from common.paths import ROOT, SPLITS_JSON, NATIVE_CACHE, REFINER_DIR  # noqa: E402
+from common.folds import N_FOLDS, SEED as FOLDS_SEED, fold_split, get_folds
+from common.geometry import FACTOR
+from common.image_cache import case_ids, load as load_image
+from common.paths import LAST_CHECKPOINT, NATIVE_CACHE, PASS1_RUN, REFINER_DIR, SIZE_NORM_RUNS, SPLITS_JSON
+from size_normalization.infer import forward, load_net, to_native_as_cache
 
-from common.image_cache import case_ids, load as load_image  # noqa: E402
-from common.geometry import CUBE, FACTOR, apply_resample, resample_grid  # noqa: E402
-from common.model import UNet3D  # noqa: E402
-from common.augmentation import pad_to_cube  # noqa: E402
-from common.folds import fold_split, get_folds  # noqa: E402
+DEFAULT_CHECKPOINT = os.path.join(SIZE_NORM_RUNS, PASS1_RUN + "_s{s}", "fold{f}", "checkpoints", LAST_CHECKPOINT)
+
+USAGE = """\
+examples:
+  python boundary_refiner/make_priors.py --seeds 42                 -> priors/x4_s42/
+  python boundary_refiner/make_priors.py --seeds 42 43 44 --tta     -> priors/x4_ens_s42-43-44_tta/
+  the size-normalised networks, each seed on its own estimated cache:
+    --checkpoint "size_normalization/runs/nnaug_x4norm_s{s}/fold{f}/checkpoints/phase1_last.pth"
+    --cache-dir "caches/cache_norm4_est_s{s}" --out-dir boundary_refiner/priors/x4norm_ens_tta"""
 
 
-# The native shape and affine of a case, read from the .npy header inside the .npz
-# without decompressing the voxels.
 def native_geometry(cache_dir: str, cid: str):
+    """The native shape and affine, the shape read from the .npy header without loading the voxels."""
     path = os.path.join(cache_dir, "x1", f"{cid}.npz")
-    with np.load(path) as d:
-        affine = d["affine"]
-    with zipfile.ZipFile(path) as z, z.open("img.npy") as f:
+    with np.load(path) as cached:
+        affine = cached["affine"]
+    with zipfile.ZipFile(path) as archive, archive.open("img.npy") as f:
         major, _ = npy_format.read_magic(f)
-        read_header = (npy_format.read_array_header_1_0 if major == 1
-                       else npy_format.read_array_header_2_0)
+        read_header = npy_format.read_array_header_1_0 if major == 1 else npy_format.read_array_header_2_0
         shape, _, _ = read_header(f)
     return tuple(shape), affine
 
 
-# The 8 mirrorings for TTA: every subset of the three axes, from none to all three.
-FLIPS = [[a for a, f in enumerate(fl) if f] for fl in itertools.product((0, 1), repeat=3)]
-
-
-# Predict one case on its coarse grid and carry the SDF to the native grid (on the GPU).
-# With TTA: the image is mirrored before padding (so the scan stays at the cube's origin),
-# each prediction is mirrored back, and the 8 SDFs are averaged.
 @torch.no_grad()
 def predict_one(model, cache_dir: str, cid: str, device, tta: bool = False):
+    """(the SDF on the native grid, on the GPU; the native affine)."""
     img4, affine4 = load_image(cache_dir, cid, FACTOR)
     native_shape, affine1 = native_geometry(cache_dir, cid)
-    img4 = img4.astype(np.float32)
-    s = img4.shape
+    field4 = forward(model, torch.from_numpy(img4.astype(np.float32)).to(device), tta)
+    return to_native_as_cache(field4, affine4, affine1, native_shape), affine1
 
-    preds = []
-    for axes in (FLIPS if tta else [[]]):
-        im = np.ascontiguousarray(np.flip(img4, axes)) if axes else img4
-        # Pad to the network's cube, predict, cut the padding off.
-        x = torch.from_numpy(pad_to_cube(im, CUBE, cval=0.0)[np.newaxis, np.newaxis]).to(device)
-        y = model(x)[:, :, :s[0], :s[1], :s[2]]
-        preds.append(torch.flip(y, [a + 2 for a in axes]) if axes else y)
-    pred = preds[0] if len(preds) == 1 else torch.stack(preds).mean(0)
 
-    # Back to native resolution through the two affines; beyond the scan, "far outside".
-    grid = resample_grid(affine4, affine1, native_shape, device=device).float()
-    native = apply_resample(pred, grid, img4.shape, cval=1.0)
-    return native[0, 0], affine1
+def output_dir(args) -> str:
+    if args.out_dir:
+        return args.out_dir
+    seeds = f"s{args.seeds[0]}" if len(args.seeds) == 1 else "ens_s" + "-".join(map(str, args.seeds))
+    return os.path.join(REFINER_DIR, "priors", f"x4_{seeds}" + ("_tta" if args.tta else ""))
 
 
 def main():
-    p = argparse.ArgumentParser(description="Out-of-fold phase 1 priors for the refiner.")
-    p.add_argument("--seeds", type=int, nargs="+", default=[42],
-                   help="one seed, or several: their SDFs are averaged (an ensemble)")
-    p.add_argument("--tta", action="store_true", help="average the 8 mirrored predictions")
-    p.add_argument("--checkpoint", default=os.path.join(
-        ROOT, "size_normalization", "runs", "nnaug_x4e500_s{s}", "fold{f}",
-        "checkpoints", "phase1_last.pth"),
-        help="checkpoint path pattern, with {s} for the seed and {f} for the fold")
-    p.add_argument("--cache-dir", default=NATIVE_CACHE,
-                   help="the grid the networks read; may contain {s} for a cache per seed")
-    p.add_argument("--splits-json", default=SPLITS_JSON)
-    p.add_argument("--out-dir", default=None,
-                   help="default: priors/x4_s<seed> (or x4_ens_s42-43-44, with _tta) here")
-    a = p.parse_args()
+    parser = argparse.ArgumentParser(description=__doc__, epilog=USAGE,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--seeds", type=int, nargs="+", default=[42],
+                        help="one seed, or several: their SDFs are averaged (an ensemble)")
+    parser.add_argument("--tta", action="store_true", help="average the 8 mirrored predictions")
+    parser.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT,
+                        help="checkpoint path pattern, with {s} for the seed and {f} for the fold")
+    parser.add_argument("--cache-dir", default=NATIVE_CACHE,
+                        help="the grid the networks read; may contain {s} for a cache per seed")
+    parser.add_argument("--splits-json", default=SPLITS_JSON)
+    parser.add_argument("--out-dir", default=None,
+                        help="default: priors/x4_s<seed> (or x4_ens_s42-43-44, with _tta) here")
+    args = parser.parse_args()
 
-    tag = f"s{a.seeds[0]}" if len(a.seeds) == 1 else "ens_s" + "-".join(map(str, a.seeds))
-    out_dir = a.out_dir or os.path.join(REFINER_DIR, "priors", f"x4_{tag}" + ("_tta" if a.tta else ""))
+    out_dir = output_dir(args)
     os.makedirs(out_dir, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    folds = get_folds(case_ids(a.cache_dir.format(s=a.seeds[0])), n_folds=5, seed=42,
-                      splits_json=a.splits_json)
+    folds = get_folds(case_ids(args.cache_dir.format(s=args.seeds[0])), n_folds=N_FOLDS, seed=FOLDS_SEED,
+                      splits_json=args.splits_json)
 
     for k in range(len(folds)):
-        # The fold-k networks of every seed, and the cases none of them trained on.
-        models = []
-        for seed in a.seeds:
-            m = UNet3D().to(device)
-            m.load_state_dict(torch.load(a.checkpoint.format(s=seed, f=k), map_location=device))
-            models.append(m.eval())
+        models = [load_net(args.checkpoint.format(s=seed, f=k), device) for seed in args.seeds]
         _, val_ids = fold_split(folds, k)
 
         for cid in val_ids:
-            # Each seed on its own cache (the size-normalised grids differ per seed); the
-            # SDFs are averaged at native resolution, where they share one grid.
-            sdfs = [predict_one(m, a.cache_dir.format(s=seed), cid, device, a.tta)
-                    for m, seed in zip(models, a.seeds)]
-            sdf = sdfs[0][0] if len(sdfs) == 1 else torch.stack([s for s, _ in sdfs]).mean(0)
-            np.savez(os.path.join(out_dir, f"{cid}.npz"),
-                     sdf=sdf.cpu().numpy().astype(np.float32), affine=sdfs[0][1])
+            # Each seed on its own cache; the SDFs are averaged on the native grid, which they share.
+            predictions = [predict_one(m, args.cache_dir.format(s=seed), cid, device, args.tta)
+                           for m, seed in zip(models, args.seeds)]
+            fields = [field for field, _ in predictions]
+            sdf = fields[0] if len(fields) == 1 else torch.stack(fields).mean(0)
+            affine1 = predictions[0][1]
+            np.savez(os.path.join(out_dir, f"{cid}.npz"), sdf=sdf.cpu().numpy().astype(np.float32), affine=affine1)
         print(f"fold {k}: {len(val_ids)} priors", flush=True)
 
     print(f"-> {out_dir}")

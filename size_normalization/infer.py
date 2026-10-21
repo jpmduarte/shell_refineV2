@@ -1,253 +1,223 @@
-# The method at inference: native image in, native SDF out, everything on the GPU.
-#
-# Used by every script that runs the networks: evaluation/predict.py, deploy/segment.py (a new
-# NIfTI), scripts/benchmark_inference.py (timing) and the size tests, so what is scored is
-# exactly what is deployed.
-#
-# Per case:
-#     z-score     normalise the native volume, as common/image_cache.py does
-#     pass 1      native -> x4 grid, the plain x4 network, head volume from its output
-#     normalise   native -> the case's size-normalised grid (size_normalization/build_cache.py's spacing)
-#     pass 2      the normalised network: once, with mirroring TTA (8 flips), or several
-#                 seeds (an ensemble), their SDFs averaged
-#     to native   the field back to the native grid; with blend, mixed with pass 1's first
-#
-# Two interchangeable resamplers: "fast" (geometry.affine_resample, the default) and
-# "geometry", the path the training caches were built with (Spacingd on the CPU going in,
-# resample_grid coming out). The same voxels at a different cost.
+"""The method at inference, native image in and native SDF out, all on the GPU; every script that runs the networks uses it.
 
+    z-score    the native volume, as common/image_cache.py
+    pass 1     native -> x4 grid, the plain x4 network, the head volume from its output
+    normalise  native -> the case's size-normalised grid
+    pass 2     the normalised network(s), optionally with 8-flip TTA, their SDFs averaged
+    to native  the field back on the native grid, optionally blended with pass 1's
+
+Two resamplers give the same voxels at a different cost: fast (geometry.affine_resample) and the
+caches' own (Spacingd going in, resample_grid coming out).
+"""
 import contextlib
+import itertools
 import json
 import os
 import time
+from dataclasses import dataclass
+from typing import Callable, NamedTuple
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+from monai.data import MetaTensor
 
-from monai.data import MetaTensor  # noqa: E402
+from common.geometry import (CUBE, FACTOR, MM3_PER_ML, add_batch_axes, affine_resample, apply_resample,
+                             crop_to_shape, downsample, drop_batch_axes, isotropic_spacing, resample_grid,
+                             spacing_grid)
+from common.model import UNet3D
 
-from common.geometry import (CUBE, FACTOR, affine_resample, apply_resample, downsample,  # noqa: E402
-                      resample_grid, spacing_grid)
-from common.model import UNet3D  # noqa: E402
+FLIPS = [[axis for axis, flip in enumerate(flips) if flip]   # every subset of the 3 axes
+         for flips in itertools.product((0, 1), repeat=3)]
+POOLING_MULTIPLE = 8   # three poolings
+K_RANGE = (0.5, 2.0)   # the accepted scale (V / V0)^(1/3): a head of about 16-1040 mL
+OUTSIDE_SDF = 1.0      # beyond the scan the SDF reads "far outside"
+MS_PER_S = 1e3
 
-# The 8 mirrorings for TTA: every subset of the 3 axes, from none to all three.
-FLIPS = [[axis for axis, flip in enumerate(flips) if flip]
-         for flips in [(x, y, z) for x in (0, 1) for y in (0, 1) for z in (0, 1)]]
 
-
-# --- Networks ---------------------------------------------------------------------------
-
-# A trained network and the grid it was trained on. train.py writes config.json in the run
-# directory, two levels above the checkpoint; runs from before it are x4 SDF networks.
-# Returns (model, config) with config {"factor", "cube", "loss"}.
-def load_net(path: str, dev):
-    state = torch.load(path, map_location=dev)
-    # Width read from the checkpoint itself (first convolution). A checkpoint trained with
-    # a contour head carries its weights; the head is built so it loads, but unused.
-    model = UNet3D(base_channels=state["enc1.block.0.weight"].shape[0],
-                   contour_head="contour_head.weight" in state).to(dev)
+def load_net(path: str, device) -> UNet3D:
+    """A trained x4 SDF network; its width is read from the checkpoint's first convolution."""
+    state = torch.load(path, map_location=device)
+    model = UNet3D(base_channels=state["enc1.block.0.weight"].shape[0]).to(device)
     model.load_state_dict(state)
     model.eval().requires_grad_(False)
-
-    cfg = {"factor": FACTOR, "cube": CUBE, "loss": "sdf"}
-    cfg_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(path))), "config.json")
-    if os.path.exists(cfg_path):
-        cfg.update({k: v for k, v in json.load(open(cfg_path)).items() if k in cfg})
-    return model, cfg
+    _check_trained_on_x4_sdf(path)
+    return model
 
 
-# Pad each axis to the training cube, or to the next multiple of 8 when the scan is
-# larger (three poolings need divisibility by 8, and the network is fully convolutional).
-# Never crops: F.pad with a negative width would do that silently.
+def _check_trained_on_x4_sdf(checkpoint_path):
+    """Runs of the resolution study (x2, x8, mask outputs) are not supported anymore."""
+    run_dir = os.path.dirname(os.path.dirname(os.path.abspath(checkpoint_path)))
+    config_path = os.path.join(run_dir, "config.json")
+    if not os.path.exists(config_path):
+        return
+    with open(config_path) as f:
+        config = json.load(f)
+    if config.get("factor", FACTOR) != FACTOR or config.get("loss", "sdf") != "sdf":
+        raise ValueError(f"{checkpoint_path}: trained with factor={config.get('factor')}, "
+                         f"loss={config.get('loss')}; only x4 SDF networks are supported")
+
+
+def round_up(n: int, multiple: int) -> int:
+    return -(-n // multiple) * multiple
+
+
 def pad(x, cube):
-    target = [max(cube, -(-n // 8) * 8) for n in x.shape]   # -(-n // 8): n/8 rounded up
+    """Pad each axis at its end to the cube, or to the next multiple of 8 if larger; never crops."""
+    target = [max(cube, round_up(n, POOLING_MULTIPLE)) for n in x.shape]
     widths = []
     for n, t in zip(reversed(x.shape), reversed(target)):   # F.pad lists the last axis first
-        widths += [0, t - n]                                # nothing before, the rest after
+        widths += [0, t - n]
     return F.pad(x, widths, value=0.0)
 
 
-# Run a network on one volume, optionally averaging the 8 mirrored predictions (TTA).
-# `cube` is the smallest input the network was trained at (96 at x4, 192 at x2); a mask
-# network (mask=True) gives the field 1 - 2 sigmoid(logits), negative inside like an SDF:
-# interpolating 1 - 2p and cutting at 0 is interpolating p and cutting at 0.5.
 @torch.no_grad()
-def forward(model, x, tta, cube=CUBE, mask=False):
-    shape, outputs = x.shape, []
+def forward(model, x, tta):
+    """The network on one (D, H, W) volume; with tta, the mean of the 8 mirrored predictions."""
+    outputs = []
     for axes in (FLIPS if tta else [[]]):
-        xi = torch.flip(x, axes) if axes else x
-        xin = pad(xi, cube)[None, None]
-        y = model(xin) if not mask else 1 - 2 * torch.sigmoid(model.logits(xin))
-        y = y[0, 0, :shape[0], :shape[1], :shape[2]]
-        # Mirror the prediction back before averaging.
-        outputs.append(torch.flip(y, axes) if axes else y)
+        flipped = torch.flip(x, axes) if axes else x
+        prediction = crop_to_shape(drop_batch_axes(model(add_batch_axes(pad(flipped, CUBE)))), x.shape)
+        outputs.append(torch.flip(prediction, axes) if axes else prediction)
     return torch.stack(outputs).mean(0)
 
 
-# --- Resampling, two interchangeable implementations ------------------------------------
+class Resampler(NamedTuple):
+    to_grid: Callable     # (native volume, native affine, spacing) -> (volume, its affine)
+    to_native: Callable   # (field, its affine, native affine, native shape) -> native field
 
-# Native volume -> a grid of the given isotropic spacing. Returns (volume, its affine).
+
 def to_grid_fast(x1, aff1, spacing):
     aff, shape = spacing_grid(aff1, x1.shape, spacing)
     return affine_resample(x1, aff1, aff, shape), aff
 
 
-# Coarse SDF -> native grid. cval=1: beyond the scan, the SDF is "far outside".
-def to_native_fast(f, aff, aff1, shape1):
-    return affine_resample(f, aff, aff1, shape1, cval=1.0)
+def to_native_fast(field, aff, aff1, shape1):
+    return affine_resample(field, aff, aff1, shape1, cval=OUTSIDE_SDF)
 
 
-# The cache builders' way: MONAI's Spacingd on the CPU.
-def to_grid_geometry(x1, aff1, spacing):
-    native_spacing = float(np.abs(aff1[0, 0]))
-    item = {"x": MetaTensor(x1.cpu()[None], affine=torch.from_numpy(aff1))}
-    out = downsample(item, spacing / native_spacing, key="x")["x"]
-    return out[0].as_tensor().to(x1.device).float(), np.asarray(out.affine.cpu())
+def to_grid_as_cache(x1, aff1, spacing):
+    """MONAI's Spacingd on the CPU, as the caches were built."""
+    with_channel = MetaTensor(x1.cpu()[None], affine=torch.from_numpy(aff1))
+    resampled = downsample({"x": with_channel}, spacing / isotropic_spacing(aff1), key="x")["x"]
+    without_channel = resampled[0]
+    return without_channel.as_tensor().to(x1.device).float(), np.asarray(resampled.affine.cpu())
 
 
-# The old predict.py's way: a per-voxel float64 grid.
-def to_native_geometry(f, aff, aff1, shape1):
-    grid = resample_grid(aff, aff1, shape1, device=f.device).float()
-    return apply_resample(f[None, None], grid, f.shape, cval=1.0)[0, 0]
+def to_native_as_cache(field, aff, aff1, shape1):
+    """A per-voxel float64 grid, as the old predict.py did."""
+    grid = resample_grid(aff, aff1, shape1, device=field.device).float()
+    return drop_batch_axes(apply_resample(add_batch_axes(field), grid, field.shape, cval=OUTSIDE_SDF))
 
 
-def resamplers(fast: bool):
-    return (to_grid_fast, to_native_fast) if fast else (to_grid_geometry, to_native_geometry)
+def resampler(fast: bool) -> Resampler:
+    return Resampler(to_grid_fast, to_native_fast) if fast else Resampler(to_grid_as_cache, to_native_as_cache)
 
 
-# --- Timing -----------------------------------------------------------------------------
-
-# Accumulates milliseconds per stage name. GPU work is asynchronous, so each stage waits
-# for it at both ends. Clock(enabled=False), the default everywhere, times nothing and
-# never synchronises.
 class Clock:
+    """Milliseconds per stage name, waiting for the GPU at both ends; disabled, it times nothing and never syncs."""
+
     def __init__(self, enabled: bool = True):
         self.enabled = enabled
         self.t = {}
 
     def span(self, name):
-        if not self.enabled:
-            return contextlib.nullcontext()
-        clock = self
+        return self._timed(name) if self.enabled else contextlib.nullcontext()
 
-        class Span:
-            def __enter__(self):
-                torch.cuda.synchronize()
-                self.t0 = time.perf_counter()
-
-            def __exit__(self, *exc):
-                torch.cuda.synchronize()
-                clock.t[name] = clock.t.get(name, 0.0) + (time.perf_counter() - self.t0) * 1e3
-
-        return Span()
+    @contextlib.contextmanager
+    def _timed(self, name):
+        torch.cuda.synchronize()
+        start = time.perf_counter()
+        try:
+            yield
+        finally:
+            torch.cuda.synchronize()
+            self.t[name] = self.t.get(name, 0.0) + (time.perf_counter() - start) * MS_PER_S
 
 
-# --- The pipeline -----------------------------------------------------------------------
-
-# Zero mean, unit std over the whole volume, as common/image_cache.py. A constant volume (std 0) stays
-# all zeros instead of turning into NaN.
-def zscore(img1, dev):
-    x1 = torch.from_numpy(np.asarray(img1, dtype=np.float32)).to(dev)
+def zscore(img1, device):
+    """Zero mean, unit std over the volume; a constant volume stays zeros instead of NaN."""
+    x1 = torch.from_numpy(np.asarray(img1, dtype=np.float32)).to(device)
     std = x1.std()
     return (x1 - x1.mean()) / (std if std > 0 else 1.0)
 
 
-# Head volume in mL of an SDF on an isotropic grid: the voxels inside, times their volume.
 def volume_ml(field, spacing: float) -> float:
-    return float((field < 0).sum()) * spacing ** 3 / 1000
+    """Head volume of an SDF on an isotropic grid."""
+    return float((field < 0).sum()) * spacing ** 3 / MM3_PER_ML
 
 
-# The size-normalised method on one case. Returns (native field on the GPU, info), where
-# info = {"volume_ml": pass 1's estimate, "k": the scale, "fallback": True when the scale
-# was rejected}; the mask is field < 0.
-#
-# v0_ml is the canonical head volume the second-pass networks were trained at (read from
-# their training cache, size_norm.reference_v0). models2 are the second-pass networks, all
-# trained on the same grid (factor2, cube2, mask2: the resolution study's x2 or mask
-# networks); with several, their SDFs are averaged. blend > 0 mixes pass 1's SDF into the
-# final one: blend x pass 1 + (1 - blend) x pass 2. volume_ml, when given, replaces pass 1's
-# estimate (the oracle: the label's volume).
-#
-# k_range guards the normalisation: pass 1's scale k = (V / V0)^(1/3) is used only within
-# it (0.5-2: a head of about 16-1040 mL). Outside it, including a pass 1 that finds no head
-# (k = 0, an infinite spacing) or a tiny estimate (a grid too large for the GPU), the case
-# returns pass 1's own segmentation instead (size_shift_test.py).
+@dataclass
+class Pass1Estimate:
+    volume_ml: float
+    k: float          # the scale (V / V0)^(1/3)
+    fallback: bool    # k outside K_RANGE: pass 1's own segmentation was returned
+
+
 @torch.no_grad()
-def segment(img1, aff1, pass1, models2, v0_ml, tta=False, dev="cuda", clock=None, fast=True,
-            blend=0.0, factor2=4, cube2=CUBE, mask2=False, k_range=(0.5, 2.0), volume=None):
+def segment(img1, aff1, pass1, models2, v0_ml, tta=False, device="cuda", clock=None, fast=True,
+            blend=0.0, k_range=K_RANGE, volume=None) -> tuple[torch.Tensor, Pass1Estimate]:
+    """The size-normalised method on one case: (native field on the GPU, pass 1's estimate); the mask is field < 0.
+
+    v0_ml is the volume the pass-2 networks were trained at (their cache's reference_v0). blend mixes
+    pass 1's field in: blend x pass 1 + (1 - blend) x pass 2. volume, when given, replaces pass 1's
+    estimate (the oracle). A k outside k_range, including no head found (k = 0), falls back to pass 1.
+    """
     clock = clock or Clock(enabled=False)
-    to_grid, to_native = resamplers(fast)
+    to_grid, to_native = resampler(fast)
     shape1 = img1.shape
-    native_spacing = float(np.abs(aff1[0, 0]))
+    native_spacing = isotropic_spacing(aff1)
 
+    # Stages named "net: ..." are the networks alone; the rest is the pipeline around them.
     with clock.span("z-score"):
-        x1 = zscore(img1, dev)
+        x1 = zscore(img1, device)
 
-    # Stage names starting with "net:" are the networks alone; everything else is the
-    # pipeline around them (resampling, normalising, the volume, thresholding, copies).
     with clock.span("to x4 grid"):
-        x4, aff4 = to_grid(x1, aff1, 4 * native_spacing)
+        x4, aff4 = to_grid(x1, aff1, FACTOR * native_spacing)
 
     with clock.span("net: pass 1"):
-        # The plain x4 network.
-        f4 = forward(pass1, x4, tta=False)
-        # Blending reuses this field. With TTA on, pass 1 gets its 8 flips too (the volume
-        # below stays the single-pass one).
-        if blend > 0 and tta:
-            f4_blend = forward(pass1, x4, tta=True)
+        pass1_single = forward(pass1, x4, tta=False)
+        pass1_field = forward(pass1, x4, tta=True) if blend > 0 and tta else pass1_single
 
     with clock.span("head volume"):
-        est_ml = volume_ml(f4, 4 * native_spacing) if volume is None else float(volume)
-        k = (est_ml / v0_ml) ** (1 / 3)
-        if blend > 0 and tta:
-            f4 = f4_blend
-    info = {"volume_ml": est_ml, "k": k, "fallback": not k_range[0] <= k <= k_range[1]}
+        estimated_ml = volume_ml(pass1_single, FACTOR * native_spacing) if volume is None else float(volume)
+        k = (estimated_ml / v0_ml) ** (1 / 3)
+    estimate = Pass1Estimate(estimated_ml, k, fallback=not k_range[0] <= k <= k_range[1])
 
-    # No usable scale: fall back to pass 1's segmentation.
-    if info["fallback"]:
+    if estimate.fallback:
         with clock.span("SDF to native grid"):
-            return to_native(f4, aff4, aff1, shape1), info
+            return to_native(pass1_field, aff4, aff1, shape1), estimate
 
     with clock.span("to normalised grid"):
-        # The spacing that shows this head at the canonical size. Unlike size_normalization/build_cache.py
-        # there is no cube cap: a larger grid is padded instead (pad()), keeping the
-        # canonical size; coarsening to fit cost 0.028 Dice on a scan 17% too large.
-        xn, affn = to_grid(x1, aff1, factor2 * native_spacing * k)
+        # No cube cap, unlike build_cache.py: a larger grid is padded; coarsening to fit cost 0.028 Dice.
+        xn, affn = to_grid(x1, aff1, FACTOR * native_spacing * k)
 
     with clock.span("net: pass 2"):
-        fn = torch.stack([forward(m, xn, tta, cube2, mask2) for m in models2]).mean(0)
+        normalised_field = torch.stack([forward(m, xn, tta) for m in models2]).mean(0)
 
     with clock.span("SDF to native grid"):
-        field = to_native(fn, affn, aff1, shape1)
-        # Pass 1 sees the head at its real size on the plain x4 grid, pass 2 at the
-        # canonical size: two different views, whose errors partly cancel. Both fields are
-        # brought to the native grid first, since their own grids differ. On 90 cases,
-        # blend 0.25 gave +0.0010 Dice without TTA (for ~5 ms) and +0.0004 with it.
+        field = to_native(normalised_field, affn, aff1, shape1)
         if blend > 0:
-            field = blend * to_native(f4, aff4, aff1, shape1) + (1 - blend) * field
+            # Two views (real size, canonical size) whose errors partly cancel: blend 0.25 gave +0.0010 Dice.
+            field = blend * to_native(pass1_field, aff4, aff1, shape1) + (1 - blend) * field
 
-    return field, info
+    return field, estimate
 
 
-# The plain method, without size normalisation: one pass of the network(s) on their own
-# fixed grid (x4 unless trained otherwise), each averaged over its 8 flips with TTA,
-# straight back to the native grid. Returns the native field on the GPU.
 @torch.no_grad()
-def segment_plain(img1, aff1, models, tta=False, dev="cuda", clock=None, fast=True,
-                  factor=4, cube=CUBE, mask=False):
+def segment_plain(img1, aff1, models, tta=False, device="cuda", clock=None, fast=True):
+    """Without size normalisation: the network(s) on the x4 grid, straight back to native."""
     clock = clock or Clock(enabled=False)
-    to_grid, to_native = resamplers(fast)
-    native_spacing = float(np.abs(aff1[0, 0]))
+    to_grid, to_native = resampler(fast)
 
     with clock.span("z-score"):
-        x1 = zscore(img1, dev)
+        x1 = zscore(img1, device)
 
     with clock.span("to x4 grid"):
-        xg, affg = to_grid(x1, aff1, factor * native_spacing)
+        x4, aff4 = to_grid(x1, aff1, FACTOR * isotropic_spacing(aff1))
 
     with clock.span("net: x4"):
-        fg = torch.stack([forward(m, xg, tta, cube, mask) for m in models]).mean(0)
+        field4 = torch.stack([forward(m, x4, tta) for m in models]).mean(0)
 
     with clock.span("SDF to native grid"):
-        return to_native(fg, affg, aff1, img1.shape)
+        return to_native(field4, aff4, aff1, img1.shape)

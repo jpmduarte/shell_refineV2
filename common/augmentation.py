@@ -1,55 +1,47 @@
-# The nnU-Net's training augmentation (v2.8, nnUNetTrainer.get_training_transforms),
-# reimplemented in numpy for an image and its signed distance field (SDF). Shared by every
-# approach in this repo.
-#
-# The same transforms, order, ranges and probabilities as nnU-Net, with two changes for an
-# SDF target:
-#   - Scaling a volume by k scales every distance by k, so the SDF is rescaled with the
-#     image. That is why the SDF comes in millimetres and untruncated (caches/cache/sdf/x4mm) and
-#     is truncated only at the end.
-#   - The SDF is interpolated linearly, where nnU-Net resamples a label.
-#
-# Pieces, usable on their own:
-#   mirror               flip image and SDF along each axis with probability 0.5
-#   spatial_transform    rotation and scaling, sampled straight into a cube
-#   intensity_transform  noise, blur, brightness, contrast, low resolution, gamma
-#                        (image only; works on any volume)
-#   augment_nnunet       all of the above in nnU-Net's order, plus padding and truncation
-#   spatial_patch        rotation and scaling of a patch about its own centre, sampled
-#                        from a larger volume, for any number of aligned arrays (used by
-#                        the boundary refiner's cubes)
-#
-# Every random draw comes from the numpy Generator passed in, in a fixed order, so a seeded
-# run reproduces exactly.
+"""nnU-Net v2.8's training augmentation (nnUNetTrainer.get_training_transforms) in numpy, for an image and its SDF.
 
+Same transforms, order, ranges and probabilities, with two changes for an SDF target: the SDF comes
+in mm and untruncated, is rescaled with the image (zooming by k scales distances by k) and truncated
+only at the end; and it is interpolated linearly where nnU-Net resamples a label.
+Every random draw comes from the Generator passed in, in a fixed order, so a seeded run reproduces exactly.
+"""
 import numpy as np
 import torch
 import torch.nn.functional as F
 from scipy.ndimage import gaussian_filter, map_coordinates
 
-from common.sdf_targets import TRUNC_MM  # noqa: E402,F401  (the SDF's truncation; re-exported)
+from common.geometry import add_batch_axes, drop_batch_axes
+from common.sdf_targets import TRUNC_MM
 
-FAR_MM = 1e3     # SDF value used outside the scan: far outside, so +1 once truncated
+FAR_MM = 1e3   # SDF outside the scan: far outside, so +1 once truncated
+
+MIRROR_P = 0.5
+ROTATION_P = 0.2
+MAX_ROTATION_DEG = 30
+SCALE_P = 0.2
+SCALE_RANGE = (0.7, 1.4)   # multiplies the sampling coordinates: 1.4 shrinks the head, 0.7 enlarges it
+GAMMA_RANGE = (0.7, 1.5)
+EPS_RANGE = 1e-7
+EPS_STD = 1e-8
 
 
-# Pad a volume at the far end of each axis up to cube^3, with a constant.
 def pad_to_cube(vol: np.ndarray, cube: int, cval: float) -> np.ndarray:
+    """Pad at the far end of each axis up to cube^3."""
     pads = [(0, cube - s) for s in vol.shape]
-    if any(p[1] < 0 for p in pads):
+    if any(after < 0 for _, after in pads):
         raise ValueError(f"shape {vol.shape} exceeds cube={cube}")
     return np.pad(vol, pads, mode="constant", constant_values=cval)
 
 
-# A random factor in [lo, hi], drawn as batchgeneratorsv2's BGContrast does: half the
-# time below 1, half above.
 def bg_contrast(rng, lo, hi):
+    """A factor in [lo, hi] drawn as batchgeneratorsv2's BGContrast: half the time below 1, half above."""
     if rng.random() < 0.5 and lo < 1:
         return rng.uniform(lo, 1)
     return rng.uniform(max(lo, 1), hi)
 
 
-# A random rotation matrix: an angle in [-max_rad, max_rad] about each axis.
 def random_rotation(rng, max_rad):
+    """An angle in [-max_rad, max_rad] about each axis."""
     ax, ay, az = rng.uniform(-max_rad, max_rad, 3)
     rx = np.array([[1, 0, 0], [0, np.cos(ax), -np.sin(ax)], [0, np.sin(ax), np.cos(ax)]])
     ry = np.array([[np.cos(ay), 0, np.sin(ay)], [0, 1, 0], [-np.sin(ay), 0, np.cos(ay)]])
@@ -57,113 +49,97 @@ def random_rotation(rng, max_rad):
     return rz @ ry @ rx
 
 
-# Mirroring: each axis flipped with probability 0.5, image and SDF together.
+def random_rotation_and_scale(rng, scale_p=SCALE_P, scale_range=SCALE_RANGE):
+    """(matrix, scale) of the drawn rotation and isotropic scaling, or None when neither was drawn."""
+    do_rotation = rng.random() < ROTATION_P
+    do_scale = rng.random() < scale_p
+    if not (do_rotation or do_scale):
+        return None
+    matrix = random_rotation(rng, np.deg2rad(MAX_ROTATION_DEG)) if do_rotation else np.eye(3)
+    scale = rng.uniform(*scale_range) if do_scale else 1.0
+    return matrix @ (np.eye(3) * scale), scale
+
+
+def sampling_coords(matrix, cube, output_centre, input_centre):
+    """For every voxel of the output cube, the input point it samples: its offset from the centre, transformed."""
+    offsets = np.indices((cube,) * 3, dtype=np.float64).reshape(3, -1) - output_centre
+    return (matrix @ offsets + input_centre[:, None]).reshape(3, cube, cube, cube)
+
+
 def mirror(img, sdf_mm, rng):
     for axis in range(3):
-        if rng.random() < 0.5:
+        if rng.random() < MIRROR_P:
             img, sdf_mm = np.flip(img, axis), np.flip(sdf_mm, axis)
-    # np.flip returns views with negative strides; make them ordinary arrays again.
-    return np.ascontiguousarray(img), np.ascontiguousarray(sdf_mm)
+    return np.ascontiguousarray(img), np.ascontiguousarray(sdf_mm)   # np.flip leaves negative strides
 
 
-# Rotation (up to +-30 degrees per axis, probability 0.2) and isotropic scaling (0.7 to
-# 1.4, probability 0.2) about the volume's centre, sampled straight into the cube.
-# Returns (image, SDF in mm), both cube-shaped, or None when neither was drawn.
-#
-# As in batchgeneratorsv2, the scale multiplies the sampling coordinates: 1.4 shrinks the
-# head and 0.7 enlarges it. Every distance changes by 1/scale, hence the division below.
-# scale_p and scale_range change the scaling's probability and range (the strong-scaling
-# baseline: train.py --scale-p, --scale-range); the defaults are nnU-Net's.
-def spatial_transform(img, sdf_mm, rng, cube, scale_p=0.2, scale_range=(0.7, 1.4)):
-    do_rot   = rng.random() < 0.2
-    do_scale = rng.random() < scale_p
-    if not (do_rot or do_scale):
+def spatial_transform(img, sdf_mm, rng, cube, scale_p=SCALE_P, scale_range=SCALE_RANGE):
+    """Rotation and scaling about the volume's centre, sampled into the cube: (image, SDF mm), or None if not drawn."""
+    drawn = random_rotation_and_scale(rng, scale_p, scale_range)
+    if drawn is None:
         return None
-    m = random_rotation(rng, np.deg2rad(30)) if do_rot else np.eye(3)
-    s = rng.uniform(*scale_range) if do_scale else 1.0
-    m = m @ (np.eye(3) * s)
-
-    # For every voxel of the output cube, the point of the input it samples: offset from
-    # the centre, rotated and scaled, then placed back around the input's centre.
+    matrix, scale = drawn
     centre = (np.array(img.shape) - 1) / 2
-    grid = np.indices((cube,) * 3, dtype=np.float64).reshape(3, -1) - centre[:, None]
-    coords = (m @ grid + centre[:, None]).reshape(3, cube, cube, cube)
+    coords = sampling_coords(matrix, cube, centre[:, None], centre)
 
-    # Linear interpolation. Outside the scan: 0 in the image (its background), far
-    # outside in the SDF.
     img = map_coordinates(img, coords, order=1, mode="constant", cval=0.0)
-    sdf_mm = map_coordinates(sdf_mm, coords, order=1, mode="constant", cval=FAR_MM) / s
+    sdf_mm = map_coordinates(sdf_mm, coords, order=1, mode="constant", cval=FAR_MM) / scale
     return img.astype(np.float32), sdf_mm.astype(np.float32)
 
 
-# The same rotation and scaling as spatial_transform (same probabilities, ranges and
-# draw order), for a patch: a cube of side `cube` whose corner is `origin` in the given
-# arrays, rotated and scaled about the cube's own centre and sampled from the arrays
-# around it, so a rotated patch is filled with real data rather than padding. Every array
-# is transformed identically (linear interpolation); `cvals` gives each one's value
-# beyond the arrays' edge.
-#
-# Returns (list of cube-shaped arrays, scale). Distances in an SDF change by 1/scale, so
-# the caller divides SDFs by it. When neither transform is drawn, the patch is cut out
-# exactly, with no interpolation.
 def spatial_patch(arrays, cvals, origin, rng, cube):
-    do_rot   = rng.random() < 0.2
-    do_scale = rng.random() < 0.2
-    if not (do_rot or do_scale):
-        sl = tuple(slice(o, o + cube) for o in origin)
-        return [a[sl].astype(np.float32) for a in arrays], 1.0
-    m = random_rotation(rng, np.deg2rad(30)) if do_rot else np.eye(3)
-    s = rng.uniform(0.7, 1.4) if do_scale else 1.0
-    m = m @ (np.eye(3) * s)
+    """spatial_transform for a patch: the cube at `origin`, turned about its own centre and filled with real data.
 
-    # Offsets of the cube's voxels from its centre, rotated and scaled, placed around the
-    # same centre in the arrays. With no transform this is exactly the plain cut.
+    Every array is transformed alike, `cvals` being each one's value beyond the edge. Returns
+    (cube-shaped arrays, scale); the caller divides SDFs by the scale. Undrawn, it is the exact cut.
+    """
+    drawn = random_rotation_and_scale(rng)
+    if drawn is None:
+        patch = tuple(slice(o, o + cube) for o in origin)
+        return [a[patch].astype(np.float32) for a in arrays], 1.0
+    matrix, scale = drawn
     half = (cube - 1) / 2
     pivot = np.array(origin, dtype=np.float64) + half
-    grid = np.indices((cube,) * 3, dtype=np.float64).reshape(3, -1) - half
-    coords = (m @ grid + pivot[:, None]).reshape(3, cube, cube, cube)
+    coords = sampling_coords(matrix, cube, half, pivot)
     out = [map_coordinates(a, coords, order=1, mode="constant", cval=cv).astype(np.float32)
            for a, cv in zip(arrays, cvals)]
-    return out, s
+    return out, scale
 
 
-# Gamma correction (exponent 0.7 to 1.5) that keeps the image's mean and std: it reshapes
-# the histogram only. With invert=True it acts on the negated image.
 def gamma(x, rng, invert):
+    """Gamma correction that keeps the mean and std, reshaping the histogram only; `invert` acts on -x."""
     if invert:
         x = -x
     mean, std = x.mean(), x.std()
     lo, value_range = x.min(), x.max() - x.min()
-    # Map to [0, 1], apply the exponent, map back.
-    x = np.power((x - lo) / (value_range + 1e-7), bg_contrast(rng, 0.7, 1.5)) * (value_range + 1e-7) + lo
-    # Restore the original mean and std.
-    x = (x - x.mean()) / (x.std() + 1e-8) * std + mean
+    in_unit_range = (x - lo) / (value_range + EPS_RANGE)
+    x = np.power(in_unit_range, bg_contrast(rng, *GAMMA_RANGE)) * (value_range + EPS_RANGE) + lo
+    x = (x - x.mean()) / (x.std() + EPS_STD) * std + mean
     return -x if invert else x
 
 
-# Intensity augmentation, each with its own probability, in the nnU-Net's order.
+def simulate_low_resolution(x, zoom):
+    """Shrink (nearest) and enlarge back (trilinear)."""
+    shape = x.shape
+    small = [max(1, round(n * zoom)) for n in shape]
+    t = add_batch_axes(torch.from_numpy(np.ascontiguousarray(x, dtype=np.float32)))
+    t = F.interpolate(t, size=small, mode="nearest-exact")
+    return drop_batch_axes(F.interpolate(t, size=shape, mode="trilinear", align_corners=False)).numpy()
+
+
 def intensity_transform(x, rng):
-    # Gaussian noise.
+    """Noise, blur, brightness, contrast, low resolution and gamma, each with its own probability, in nnU-Net's order."""
     if rng.random() < 0.1:
         x = x + rng.normal(0.0, np.sqrt(rng.uniform(0, 0.1)), x.shape)
-    # Gaussian blur.
     if rng.random() < 0.2 and rng.random() < 0.5:
         x = gaussian_filter(x, sigma=rng.uniform(0.5, 1.0, 3))
-    # Brightness: multiply by a factor.
     if rng.random() < 0.15:
-        x = x * bg_contrast(rng, 0.75, 1.25)
-    # Contrast: stretch around the mean, keeping the original value range.
+        x = x * bg_contrast(rng, 0.75, 1.25)   # brightness
     if rng.random() < 0.15:
         lo, hi, mean = x.min(), x.max(), x.mean()
-        x = np.clip((x - mean) * bg_contrast(rng, 0.75, 1.25) + mean, lo, hi)
-    # Simulated low resolution: shrink (nearest) and enlarge back (trilinear).
+        x = np.clip((x - mean) * bg_contrast(rng, 0.75, 1.25) + mean, lo, hi)   # contrast, within the range
     if rng.random() < 0.25 and rng.random() < 0.5:
-        shape, zoom = x.shape, rng.uniform(0.5, 1.0)
-        small = [max(1, round(n * zoom)) for n in shape]
-        t = torch.from_numpy(np.ascontiguousarray(x, dtype=np.float32))[None, None]
-        t = F.interpolate(t, size=small, mode="nearest-exact")
-        x = F.interpolate(t, size=shape, mode="trilinear", align_corners=False)[0, 0].numpy()
-    # Gamma on the inverted image, then on the image itself.
+        x = simulate_low_resolution(x, rng.uniform(0.5, 1.0))
     if rng.random() < 0.1:
         x = gamma(x, rng, invert=True)
     if rng.random() < 0.3:
@@ -171,22 +147,17 @@ def intensity_transform(x, rng):
     return x
 
 
-# The full augmentation: unpadded image and SDF in mm in, cube-shaped image and
-# normalised SDF ([-1, 1]) out.
-def augment_nnunet(img, sdf_mm, rng, cube, trunc_mm=TRUNC_MM, scale_p=0.2, scale_range=(0.7, 1.4)):
-    # Mirroring first (the nnU-Net does it last), on the unpadded arrays, so the scan stays
-    # at the origin of the cube, where prediction puts it. Rotations are symmetric, so the
-    # order changes nothing else.
+def augment_nnunet(img, sdf_mm, rng, cube, trunc_mm=TRUNC_MM, scale_p=SCALE_P, scale_range=SCALE_RANGE):
+    """Unpadded image and SDF in mm in; cube-shaped image and normalised SDF out."""
+    # Mirroring first (nnU-Net does it last) so the scan stays at the cube's origin, where prediction puts it.
     img, sdf_mm = mirror(img, sdf_mm, rng)
 
-    # Rotation and scaling, which also pad to the cube; if neither was drawn, just pad.
-    out = spatial_transform(img, sdf_mm, rng, cube, scale_p, scale_range)
-    if out is None:
+    transformed = spatial_transform(img, sdf_mm, rng, cube, scale_p, scale_range)
+    if transformed is None:
         img = pad_to_cube(img, cube, cval=0.0)
         sdf_mm = pad_to_cube(sdf_mm, cube, cval=FAR_MM)
     else:
-        img, sdf_mm = out
+        img, sdf_mm = transformed
 
-    # Truncate and normalise the target only now, after any rescaling.
-    sdf = np.clip(sdf_mm, -trunc_mm, trunc_mm) / trunc_mm
+    sdf = np.clip(sdf_mm, -trunc_mm, trunc_mm) / trunc_mm   # only now, after any rescaling
     return intensity_transform(img, rng).astype(np.float32), sdf.astype(np.float32)

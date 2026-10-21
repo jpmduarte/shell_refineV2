@@ -1,74 +1,21 @@
-"""Run queued jobs, starting one only when the GPU has room for it.
+"""Run queued jobs, starting each only when the GPU and the system RAM have room for it.
 
-A job is a file in queue/pending/ holding shell commands, preceded by a header:
+A job is a file in queue/pending/ of PowerShell commands, preceded by a header:
 
-    # probe: python scripts/probe_vram.py --shape 8 64 64 64
-    # vram: 3000
+    # probe: python scripts/probe_vram.py --shape 8 64 64 64   (prints PEAK_MB <n>: measured cost)
+    # vram: 3000                                               (fallback when there is no probe)
+    # ram: 7000
+    # needs: size_normalization/runs/fold*/preds_val/*.npz >= 90
     # desc: cube 64^3 x8, train -> predict -> evaluate
 
-Jobs start in filename order, so numeric prefixes set priority: 010_..., 020_....
-Several run at once whenever one more fits in what is free; otherwise it waits. This
-matters because a single training here leaves the GPU idle ~70% of the time — it is
-bound by decompressing crops on the CPU, not by compute — so packing several together
-costs little and finishes the set sooner.
+Jobs start in filename order (numeric prefixes set priority), several at once while they fit;
+files dropped into pending/ are picked up while it runs. A job's exit status is its last
+command's, so steps must be chained with `; if (-not $?) { exit 1 }`.
 
-`# probe` is how a job says what it costs: a command that runs one real forward and
-backward at the job's shape and prints `PEAK_MB <n>`. Scheduling on a measurement
-beats scheduling on an estimate — the guesses for these four configurations were out
-by up to 300 MiB in both directions. `# vram` is the fallback when there is no probe,
-or when the probe cannot run yet.
-
-Accounting deliberately does not attribute VRAM per process: nvidia-smi reports that
-as N/A on Windows. The runner reads total free memory, keeps a margin clear, and waits
-a settling period after each launch so a new allocation is visible before the next
-decision.
-
-Jobs can be added while it runs — it rescans between decisions, so dropping a file into
-queue/pending/ schedules it without touching the running process.
-
-A failing job moves to queue/failed/ and the others carry on. A job's exit status is
-that of its last command, so a pipeline must chain its steps with `; if (-not $?) {
-exit 1 }` or the later steps will paper over an earlier failure — the exact way a
-killed training still produced an evaluation of a stale checkpoint here.
-
-Stopping the runner does not stop what it launched: those jobs keep going, and keep
-holding the GPU. So each one records its PID beside it in running/, and a runner
-starting up checks them — adopting the ones still alive, and moving the rest to
-failed/. Without that, a restart launched live jobs a second time and the duplicates
-fought over the same memory. Adopted jobs are polled rather than waited on, since they
-are not this process's children, and their memory still counts because the budget is
-read from nvidia-smi rather than tallied per job.
-
-An interrupted job goes to failed/ rather than back to pending/. Whatever killed it —
-an OOM, a missing file, a kill — will usually happen again, and relaunching silently
-hides both the interruption and its cause. Putting it back is a decision to make after
-looking at the log.
-
-Telling an interrupted job from a finished one needs evidence the job leaves behind,
-because a dead PID says nothing about how it ended. Each job's outcome is recorded in
-queue/.outcomes/ as it finishes, outside running/ so it survives the move. Without that
-record, thirty-one completed runs were filed as failures simply because no runner was
-watching when they ended.
-
-Changing how any of that is written means bumping VERSION. A runner will adopt jobs
-started by an older one, but warns when it does: those jobs write no outcome record, so
-if they end unwatched they will look like crashes; check their logs before trusting
-the verdict.
-
-Both memories gate a launch. VRAM is the obvious one; system RAM is the one that bit —
-four slab folds fit easily in 12 GB of VRAM and still took 31 of 32 GB of RAM, because
-every dataloader worker decompresses its own native-resolution crop. A job declares
-both with # vram: and # ram:, and RAM keeps a wider margin: overcommitting the GPU
-fails one job, overcommitting RAM puts the whole machine into swap.
-
---max-jobs is rarely the right tool. The two memory checks already decide, measured
-rather than guessed, and capping on top of them leaves the card idle: five phase 1
-folds together use 4.3 GB of 12.2 GB.
-
-    python scripts/queue_runner.py
-    python scripts/queue_runner.py --watch
+Stopping the runner does not stop its jobs: each records its PID in running/, and the next runner
+adopts the live ones and files the rest by the outcome they recorded in queue/.outcomes/.
+An interrupted job goes to failed/, not back to pending/: look at its log before relaunching.
 """
-
 import argparse
 import atexit
 import glob
@@ -78,38 +25,40 @@ import re
 import shutil
 import subprocess
 import time
+from dataclasses import dataclass
 from datetime import datetime
 
-HERE  = os.path.dirname(os.path.abspath(__file__))
-QUEUE = os.path.join(os.path.dirname(HERE), "queue")
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+QUEUE = os.path.join(ROOT, "queue")
 PENDING, RUNNING = os.path.join(QUEUE, "pending"), os.path.join(QUEUE, "running")
-DONE, FAILED     = os.path.join(QUEUE, "done"),    os.path.join(QUEUE, "failed")
-LOGS             = os.path.join(QUEUE, "logs")
-LOCK             = os.path.join(QUEUE, ".runner.lock")
-OUTCOMES         = os.path.join(QUEUE, ".outcomes")
+DONE, FAILED = os.path.join(QUEUE, "done"), os.path.join(QUEUE, "failed")
+LOGS = os.path.join(QUEUE, "logs")
+LOCK = os.path.join(QUEUE, ".runner.lock")
+OUTCOMES = os.path.join(QUEUE, ".outcomes")
 
-# Bumped when the runner changes how it records state. A job started by an
-# older runner may leave state this one cannot interpret: version 1 wrote no
-# outcome record, so its finished jobs were indistinguishable from crashed
-# ones and thirty-one completed runs were filed as failures.
-VERSION = 2
+VERSION = 2   # bump when the recorded state changes; version 1 wrote no outcome records
 
 DEFAULT_VRAM_MB = 3000
-# A phase 2 training with two dataloader workers measured about 7 GB of RAM: the main
-# process plus a worker each holding a decompressed native-resolution crop.
-DEFAULT_RAM_MB  = 7000
-SETTLE_SECONDS  = 75
-MARGIN_MB       = 1536
-# Leave more system RAM clear than VRAM: overcommitting the GPU fails a job, while
-# overcommitting RAM takes the whole machine down to swap.
-RAM_MARGIN_MB   = 4096
-# A probe allocates real memory, so it needs room of its own. Below this, defer the
-# probe and fall back to the declared figure rather than risk an OOM in a running job.
-PROBE_HEADROOM_MB = 4500
+DEFAULT_RAM_MB = 7000      # a refiner training with two loader workers measured about 7 GB
+SETTLE_SECONDS = 75        # after a launch, so its allocation is visible before the next decision
+MARGIN_MB = 1536
+RAM_MARGIN_MB = 4096       # wider: overcommitting RAM swaps the whole machine, not one job
+PROBE_HEADROOM_MB = 4500   # a probe allocates real memory; below this, use the declared figure
+PROBE_TIMEOUT_S = 600
+UNLIMITED_MB = 10 ** 9     # when a memory reading is unavailable, which disables that gate
+LOG_TAIL_CHARS = 8000
+FAILURE_MARKERS = ("Traceback (most recent call last)", "FAILED", "WRONG COUNT")
+HEADER_LINE = re.compile(r"^\s*#\s*(vram|ram|desc|probe|needs)\s*:\s*(.+?)\s*$", re.I)
+NEEDS_SPEC = re.compile(r"^(.*?)(?:\s*>=\s*(\d+))?$")
+
+
+def now() -> str:
+    return f"{datetime.now():%H:%M:%S}"
 
 
 def gpu_total_used() -> tuple[int, int]:
-    """(total, used) MiB. (0, 0) if nvidia-smi is unavailable, which disables gating."""
+    """(total, used) MiB; (0, 0) if nvidia-smi is unavailable."""
     try:
         out = subprocess.check_output(
             ["nvidia-smi", "--query-gpu=memory.total,memory.used",
@@ -120,14 +69,13 @@ def gpu_total_used() -> tuple[int, int]:
         return 0, 0
 
 
-def host_free_mb() -> int:
-    """Free system RAM in MiB, or a large number if it cannot be read.
+def gpu_free_mb() -> int:
+    total, used = gpu_total_used()
+    return (total - used) if total else UNLIMITED_MB
 
-    Gating on VRAM alone is not enough: four slab folds fit easily in 12 GB of VRAM and
-    still took 31 of 32 GB of RAM between them, because each dataloader worker
-    decompresses its own copy of a native-resolution crop — seven arrays of about 45 MB
-    per case, times three processes per fold.
-    """
+
+def host_free_mb() -> int:
+    """Free system RAM in MiB; each loader worker decompresses its own native-resolution crop."""
     try:
         out = subprocess.check_output(
             ["powershell", "-NoProfile", "-Command",
@@ -135,20 +83,35 @@ def host_free_mb() -> int:
             text=True, stderr=subprocess.DEVNULL, timeout=30)
         return int(int(out.strip()) / 1024)
     except Exception:
-        return 10 ** 9
+        return UNLIMITED_MB
 
 
-def parse_header(text: str) -> dict:
-    head = {"vram": DEFAULT_VRAM_MB, "ram": DEFAULT_RAM_MB, "desc": "", "probe": "",
-            "needs": ""}
+@dataclass
+class Header:
+    vram: int = DEFAULT_VRAM_MB
+    ram: int = DEFAULT_RAM_MB
+    desc: str = ""
+    probe: str = ""
+    needs: str = ""
+
+
+def parse_header(text: str) -> Header:
+    """The `# key: value` lines before the first command."""
+    header = Header()
     for line in text.splitlines():
-        m = re.match(r"^\s*#\s*(vram|ram|desc|probe|needs)\s*:\s*(.+?)\s*$", line, re.I)
-        if m:
-            key, value = m.group(1).lower(), m.group(2)
-            head[key] = int(value) if key in ("vram", "ram") else value
+        match = HEADER_LINE.match(line)
+        if match:
+            key, value = match.group(1).lower(), match.group(2)
+            setattr(header, key, int(value) if key in ("vram", "ram") else value)
         elif line.strip() and not line.lstrip().startswith("#"):
             break
-    return head
+    return header
+
+
+def read_job(path: str) -> str:
+    """utf-8-sig: Set-Content writes a BOM, which PowerShell would read as part of the first command."""
+    with open(path, encoding="utf-8-sig") as f:
+        return f.read()
 
 
 _probe_cache: dict[str, int] = {}
@@ -166,38 +129,26 @@ def measure(probe: str, declared: int, free: int) -> int:
     try:
         out = subprocess.check_output(
             ["powershell", "-ExecutionPolicy", "Bypass", "-Command", probe],
-            text=True, stderr=subprocess.DEVNULL, timeout=600)
-        m = re.search(r"PEAK_MB\s+(\d+)", out)
-        if not m:
+            text=True, stderr=subprocess.DEVNULL, timeout=PROBE_TIMEOUT_S)
+        match = re.search(r"PEAK_MB\s+(\d+)", out)
+        if not match:
             return declared
-        peak = int(m.group(1))
+        peak = int(match.group(1))
     except Exception:
         return declared
 
     _probe_cache[probe] = peak
-    print(f"[{datetime.now():%H:%M:%S}] probe  {peak} MiB measured "
-          f"(header said {declared})", flush=True)
+    print(f"[{now()}] probe  {peak} MiB measured (header said {declared})", flush=True)
     return peak
 
 
 def needs_met(spec: str) -> tuple[bool, str]:
-    """Is a job's `# needs:` satisfied?
-
-    The spec is a glob, optionally followed by `>= n` for how many files must match:
-
-        # needs: size_normalization/runs/fold*/preds_val/*.npz >= 90
-
-    Counting files rather than waiting on a marker keeps it honest about partial work —
-    a crop directory with sixty of ninety cases is not ready, and a job that started
-    anyway would train on whatever happened to exist.
-    """
+    """A glob, optionally `>= n`: that many files must exist, so partial work does not count as ready."""
     if not spec:
         return True, ""
-
-    m = re.match(r"^(.*?)(?:\s*>=\s*(\d+))?$", spec.strip())
-    pattern, want = m.group(1).strip(), int(m.group(2) or 1)
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    have = len(glob.glob(os.path.join(root, pattern)))
+    match = NEEDS_SPEC.match(spec.strip())
+    pattern, want = match.group(1).strip(), int(match.group(2) or 1)
+    have = len(glob.glob(os.path.join(ROOT, pattern)))
     return have >= want, f"{have}/{want}"
 
 
@@ -213,36 +164,29 @@ class Job:
         self.adopted = False
 
 
-# A job script announces its own failures before exiting, and a crash leaves a
-# traceback. Both are visible in the log even when the exit status is not.
-FAILURE_MARKERS = ("Traceback (most recent call last)", "FAILED", "WRONG COUNT")
-
-
 def log_says_failed(log_path: str | None) -> bool:
-    """Whether an adopted job's log shows it died, since its exit status is lost."""
+    """A job announces its own failures and a crash leaves a traceback, even when the exit status is lost."""
     if not log_path or not os.path.exists(log_path):
         return False
     try:
         with open(log_path, encoding="utf-8", errors="replace") as f:
-            tail = f.read()[-8000:]
+            tail = f.read()[-LOG_TAIL_CHARS:]
     except OSError:
         return False
-    return any(m in tail for m in FAILURE_MARKERS)
+    return any(marker in tail for marker in FAILURE_MARKERS)
+
+
+def pid_alive(pid: int) -> bool:
+    try:
+        out = subprocess.check_output(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                                      text=True, stderr=subprocess.DEVNULL)
+        return str(pid) in out
+    except Exception:
+        return False
 
 
 class Adopted:
-    """A job from a previous runner that is still alive.
-
-    Polled by PID rather than waited on: it is not this process's child, so there is no
-    exit status to collect. That also means its VRAM has to keep counting against the
-    budget, or this runner would launch on top of memory that is already spoken for.
-
-    Its disposition therefore comes from the log rather than from an exit code. It used
-    to be scored 0 whenever the PID disappeared, which filed five folds that had all
-    crashed at epoch 30 under done/, where nothing looked at them again — the `needs:`
-    gate held their dependents back, so the queue sat idle for an hour saying it was
-    waiting rather than saying they had died.
-    """
+    """A live job from a previous runner: polled by PID (it is not our child), its verdict read from its log."""
 
     def __init__(self, pid: int, log_path: str | None = None):
         self.pid = pid
@@ -255,28 +199,12 @@ class Adopted:
         return self.returncode
 
 
-def pid_alive(pid: int) -> bool:
-    try:
-        out = subprocess.check_output(
-            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
-            text=True, stderr=subprocess.DEVNULL)
-        return str(pid) in out
-    except Exception:
-        return False
-
-
 def outcome_path(name: str) -> str:
     return os.path.join(OUTCOMES, name + ".json")
 
 
 def mark_outcome(name: str, status: str, code: int) -> None:
-    """Record how a job ended, outside running/ so it survives the move.
-
-    A runner that outlives its jobs does not need this. One that is killed while jobs
-    are still going does: the next runner finds them in running/ with dead PIDs and
-    cannot otherwise tell a job that crashed from one that finished normally in the
-    gap. Eleven completed jobs were filed as failures that way.
-    """
+    """Outside running/, so a later runner can tell a finished job from a crashed one."""
     os.makedirs(OUTCOMES, exist_ok=True)
     with open(outcome_path(name), "w") as f:
         json.dump({"status": status, "exit": code, "at": time.time()}, f)
@@ -291,16 +219,7 @@ def read_outcome(name: str) -> dict | None:
 
 
 def acquire_lock(force: bool = False) -> None:
-    """Refuse to start if another runner is already here.
-
-    Two runners do not merely duplicate effort: each sees the other's jobs in running/
-    but has no idea the other exists, so both scan pending/ and both launch the same
-    file. That happened - two trainings of the same fold, competing for the GPU, which
-    then filled and left the remaining folds held.
-
-    Adoption by PID does not cover this. It reconciles a runner with jobs from a
-    runner that is gone; here both are alive.
-    """
+    """Refuse to start beside another live runner: both would launch the same pending files."""
     if os.path.exists(LOCK):
         try:
             with open(LOCK) as f:
@@ -322,14 +241,12 @@ def acquire_lock(force: bool = False) -> None:
             print(f"clearing stale lock from pid {pid}")
 
     with open(LOCK, "w") as f:
-        json.dump({"pid": os.getpid(),
-                   "started": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}, f)
+        json.dump({"pid": os.getpid(), "started": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}, f)
     atexit.register(release_lock)
 
 
 def release_lock() -> None:
-    """Only ours: a runner that crashed leaves its lock, and the next one clears it
-    after checking the PID rather than assuming."""
+    """Only our own lock; a crashed runner's is cleared by the next one after checking its PID."""
     try:
         with open(LOCK) as f:
             if json.load(f).get("pid") == os.getpid():
@@ -338,16 +255,16 @@ def release_lock() -> None:
         pass
 
 
+def state_path(name: str) -> str:
+    return os.path.join(RUNNING, name + ".state")
+
+
 def launch(name: str, need: int) -> Job:
     job = Job(name)
     active = os.path.join(RUNNING, name)
     shutil.move(os.path.join(PENDING, name), active)
-
-    # utf-8-sig: PowerShell's Set-Content writes a BOM, and a leading U+FEFF makes
-    # `powershell -Command` read the first command name as "﻿Write-Output".
-    with open(active, encoding="utf-8-sig") as f:
-        commands = f.read()
-    job.vram, job.desc = need, parse_header(commands)["desc"]
+    commands = read_job(active)
+    job.vram, job.desc = need, parse_header(commands).desc
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_path = os.path.join(LOGS, f"{stamp}_{name}.log")
@@ -362,21 +279,25 @@ def launch(name: str, need: int) -> Job:
     job.started = time.time()
     job.log_path = log_path
 
-    # Written so a later runner can tell a job that is still going from one whose
-    # runner died. Without it, restarting requeues everything in running/ blindly:
-    # live jobs get launched a second time while still holding the GPU, and the
-    # duplicates fight over it.
-    with open(os.path.join(RUNNING, name + ".state"), "w") as f:
+    # So a later runner adopts this job instead of launching it a second time.
+    with open(state_path(name), "w") as f:
         json.dump({"pid": job.proc.pid, "vram": job.vram, "desc": job.desc,
                    "log": log_path, "started": job.started, "runner": VERSION}, f)
 
-    print(f"[{datetime.now():%H:%M:%S}] start  {name}  ({job.vram} MiB)"
+    print(f"[{now()}] start  {name}  ({job.vram} MiB)"
           f"{'  — ' + job.desc if job.desc else ''}", flush=True)
     print(f"                       log: {log_path}", flush=True)
     return job
 
 
+def file_job(name: str, destination: str) -> None:
+    shutil.move(os.path.join(RUNNING, name), os.path.join(destination, name))
+    if os.path.exists(state_path(name)):
+        os.remove(state_path(name))
+
+
 def reap(running: list[Job]) -> list[Job]:
+    """File the jobs that ended; returns those still running."""
     still = []
     for job in running:
         code = job.proc.poll()
@@ -386,179 +307,170 @@ def reap(running: list[Job]) -> list[Job]:
         if job.log:
             job.log.close()
         ok = code == 0
-        shutil.move(os.path.join(RUNNING, job.name),
-                    os.path.join(DONE if ok else FAILED, job.name))
-        state_path = os.path.join(RUNNING, job.name + ".state")
-        if os.path.exists(state_path):
-            os.remove(state_path)
+        file_job(job.name, DONE if ok else FAILED)
         mark_outcome(job.name, "done" if ok else "failed", code)
         mins = (time.time() - job.started) / 60
-        # An adopted job has no exit status to collect: it is not this process's child,
-        # so its verdict was read out of its log instead (see Adopted.poll).
         status = "done " if ok else "FAIL "
-        detail = (f"{mins:.0f} min, from log" if job.adopted
-                  else f"exit {code}, {mins:.0f} min")
-        print(f"[{datetime.now():%H:%M:%S}] {status} {job.name}  ({detail})", flush=True)
+        detail = f"{mins:.0f} min, from log" if job.adopted else f"exit {code}, {mins:.0f} min"
+        print(f"[{now()}] {status} {job.name}  ({detail})", flush=True)
     return still
 
 
-def main():
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--watch", action="store_true",
-                   help="stay alive when the queue empties, waiting for new jobs")
-    p.add_argument("--max-jobs", type=int, default=0,
-                   help="concurrent jobs cap; 0 means only free VRAM limits it")
-    p.add_argument("--poll", type=int, default=20, help="seconds between decisions")
-    p.add_argument("--margin", type=int, default=MARGIN_MB,
-                   help="MiB kept free on top of what jobs declare")
-    p.add_argument("--ram-margin", type=int, default=RAM_MARGIN_MB,
-                   help="MiB of system RAM kept free; overcommitting it swaps the whole machine")
-    p.add_argument("--force", action="store_true",
-                   help="start even if another runner holds the lock; only when you know "
-                        "it is dead and the lock is stale")
-    a = p.parse_args()
+def read_state(name: str) -> dict:
+    if not os.path.exists(state_path(name)):
+        return {}
+    try:
+        with open(state_path(name)) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        # Loud: treating it as stale relaunches the job if it is in fact still running.
+        print(f"WARNING: {name}.state is unreadable ({e}); treating as stale. "
+              f"Check nothing is still running before it relaunches.")
+        return {}
 
-    for d in (PENDING, RUNNING, DONE, FAILED, LOGS, OUTCOMES):
-        os.makedirs(d, exist_ok=True)
-    acquire_lock(a.force)
 
-    # Anything in running/ belonged to a previous runner. Some of those jobs may still
-    # be going: stopping a runner does not stop what it launched. Requeueing blindly
-    # would start them a second time while the originals still hold the GPU, so each is
-    # checked by the PID it recorded and either adopted or requeued.
-    running: list[Job] = []
+def adopt(name: str, state: dict) -> Job:
+    job = Job(name)
+    job.proc = Adopted(state["pid"], state.get("log"))
+    job.vram = state.get("vram", DEFAULT_VRAM_MB)
+    job.desc = state.get("desc", "")
+    job.log_path = state.get("log")
+    job.started = state.get("started", time.time())
+    job.adopted = True
+    mins = (time.time() - job.started) / 60
+    print(f"adopted running job: {name} (pid {state['pid']}, {job.vram} MiB, {mins:.0f} min in)")
+    if state.get("runner", 1) < VERSION:
+        print(f"  NOTE: started by runner v{state.get('runner', 1)}, which does "
+              f"not write outcome records.\n"
+              f"  If this process ends while no runner is watching, its result "
+              f"will look like a crash.\n"
+              f"  Check its log before trusting the verdict.")
+    if job.log_path:
+        print(f"                     log: {job.log_path}")
+    return job
+
+
+def recover_previous_jobs() -> list[Job]:
+    """Adopt a previous runner's live jobs; file the dead ones by the outcome they recorded."""
+    running = []
     for name in sorted(os.listdir(RUNNING)):
         if name.endswith(".state"):
             continue
-        state_path = os.path.join(RUNNING, name + ".state")
-        state = {}
-        if os.path.exists(state_path):
-            try:
-                with open(state_path) as f:
-                    state = json.load(f)
-            except (json.JSONDecodeError, OSError) as e:
-                # Loud, because the consequence is silently relaunching a job that is
-                # still running: the fallback below looks identical to "no state file".
-                print(f"WARNING: {name}.state is unreadable ({e}); treating as stale. "
-                      f"Check nothing is still running before it relaunches.")
-
+        state = read_state(name)
         pid = state.get("pid")
         if pid and pid_alive(pid):
-            job = Job(name)
-            job.proc = Adopted(pid, state.get("log"))
-            job.vram = state.get("vram", DEFAULT_VRAM_MB)
-            job.desc = state.get("desc", "")
-            job.log_path = state.get("log")
-            job.started = state.get("started", time.time())
-            job.adopted = True
-            running.append(job)
-            mins = (time.time() - job.started) / 60
-            print(f"adopted running job: {name} (pid {pid}, {job.vram} MiB, "
-                  f"{mins:.0f} min in)")
-            if state.get("runner", 1) < VERSION:
-                print(f"  NOTE: started by runner v{state.get('runner', 1)}, which does "
-                      f"not write outcome records.\n"
-                      f"  If this process ends while no runner is watching, its result "
-                      f"will look like a crash.\n"
-                      f"  Check its log before trusting the verdict.")
-            if job.log_path:
-                print(f"                     log: {job.log_path}")
-        else:
-            # The PID is gone, but that alone does not say whether the job finished.
-            # A runner killed while its jobs were still going leaves them looking
-            # identical to jobs that crashed, so check what the job itself recorded.
-            outcome = read_outcome(name)
-            if outcome and outcome.get("status") == "done":
-                print(f"completed while no runner was watching: {name}")
-                dest = DONE
-            else:
-                # Genuinely interrupted. To failed/ rather than back to pending/:
-                # whatever killed it usually happens again, and relaunching silently
-                # hides both the interruption and its cause.
-                print(f"job interrupted, moved to failed/: {name}")
-                dest = FAILED
-            shutil.move(os.path.join(RUNNING, name), os.path.join(dest, name))
-            if os.path.exists(state_path):
-                os.remove(state_path)
-
-    total, _ = gpu_total_used()
-    cap = a.max_jobs if a.max_jobs else "unlimited"
-    print(f"GPU total {total} MiB   concurrency {cap}   margin {a.margin} MiB\n")
-
-    last_launch = 0.0
-    last_hold = None
-    while True:
-        running = reap(running)
-        pending = sorted(f for f in os.listdir(PENDING)
-                         if not f.startswith(".") and not f.endswith(".state"))
-
-        if not pending and not running:
-            if not a.watch:
-                break
-            time.sleep(a.poll)
+            running.append(adopt(name, state))
             continue
+        outcome = read_outcome(name)
+        if outcome and outcome.get("status") == "done":
+            print(f"completed while no runner was watching: {name}")
+            file_job(name, DONE)
+        else:
+            print(f"job interrupted, moved to failed/: {name}")
+            file_job(name, FAILED)
+    return running
 
-        settling = time.time() - last_launch < SETTLE_SECONDS
-        under_cap = (not a.max_jobs) or len(running) < a.max_jobs
 
-        # Skip past jobs whose inputs do not exist yet and take the first that is
-        # ready, rather than stopping at the head of the queue. Order still decides
-        # among jobs that can all run.
-        ready, blocked = None, []
-        for candidate in pending:
-            with open(os.path.join(PENDING, candidate), encoding="utf-8-sig") as f:
-                head = parse_header(f.read())
-            ok, progress = needs_met(head["needs"])
-            if ok:
-                ready = (candidate, head)
-                break
-            blocked.append((candidate, head["needs"], progress))
+def pending_jobs() -> list[str]:
+    return sorted(f for f in os.listdir(PENDING) if not f.startswith(".") and not f.endswith(".state"))
 
-        # One line for the whole scan, not one per blocked job: with twenty-odd jobs
-        # waiting on the same dependency, per-job lines repeat every poll and bury
-        # everything else. Reported only when the picture changes.
+
+def first_ready(pending: list[str]):
+    """(the first job whose needs are met, its header) or None, and the blocked ones before it."""
+    blocked = []
+    for candidate in pending:
+        header = parse_header(read_job(os.path.join(PENDING, candidate)))
+        ok, progress = needs_met(header.needs)
+        if ok:
+            return (candidate, header), blocked
+        blocked.append((candidate, header.needs, progress))
+    return None, blocked
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--watch", action="store_true",
+                        help="stay alive when the queue empties, waiting for new jobs")
+    parser.add_argument("--max-jobs", type=int, default=0,
+                        help="concurrent jobs cap; 0 means only free memory limits it (rarely worth setting)")
+    parser.add_argument("--poll", type=int, default=20, help="seconds between decisions")
+    parser.add_argument("--margin", type=int, default=MARGIN_MB, help="MiB kept free on top of what jobs declare")
+    parser.add_argument("--ram-margin", type=int, default=RAM_MARGIN_MB,
+                        help="MiB of system RAM kept free; overcommitting it swaps the whole machine")
+    parser.add_argument("--force", action="store_true",
+                        help="start even if another runner holds the lock; only when you know "
+                             "it is dead and the lock is stale")
+    return parser.parse_args()
+
+
+class Scheduler:
+    """The launch decisions; holds are printed only when the situation changes, not every poll."""
+
+    def __init__(self, args, running):
+        self.args = args
+        self.running = running
+        self.last_launch = 0.0
+        self.last_hold = None
+
+    def report_blocked(self, blocked):
+        state = ("waiting", len(blocked), blocked[0][2])
+        if state == self.last_hold:
+            return
+        first, need, progress = blocked[0]
+        more = f" (+{len(blocked) - 1} more)" if len(blocked) > 1 else ""
+        print(f"[{now()}] wait   {first} needs {need} ({progress}){more}", flush=True)
+        self.last_hold = state
+
+    def try_launch(self, name, header: Header):
+        need = measure(header.probe, header.vram, gpu_free_mb())
+        free = gpu_free_mb()   # again: the probe allocated and released while measuring
+        ram_free = host_free_mb()
+        gpu_ok = free >= need + self.args.margin
+        ram_ok = ram_free >= header.ram + self.args.ram_margin
+
+        if gpu_ok and ram_ok:
+            self.running.append(launch(name, need))
+            self.last_launch = time.time()
+            return
+        state = (name, len(self.running), gpu_ok, ram_ok)
+        if state != self.last_hold:
+            why = "+".join(part for part, ok in (("GPU", gpu_ok), ("RAM", ram_ok)) if not ok)
+            print(f"[{now()}] hold   {name} on {why}: "
+                  f"needs {need} MiB VRAM ({free} free), "
+                  f"{header.ram} MiB RAM ({ram_free} free) "
+                  f"({len(self.running)} running)", flush=True)
+            self.last_hold = state
+
+    def step(self) -> bool:
+        """One decision; False once there is nothing left to do."""
+        self.running = reap(self.running)
+        pending = pending_jobs()
+        if not pending and not self.running:
+            return self.args.watch
+
+        settling = time.time() - self.last_launch < SETTLE_SECONDS
+        under_cap = (not self.args.max_jobs) or len(self.running) < self.args.max_jobs
+        ready, blocked = first_ready(pending)
         if ready is None and blocked:
-            state = ("waiting", len(blocked), blocked[0][2])
-            if state != last_hold:
-                first, need, progress = blocked[0]
-                more = f" (+{len(blocked) - 1} more)" if len(blocked) > 1 else ""
-                print(f"[{datetime.now():%H:%M:%S}] wait   {first} needs {need} "
-                      f"({progress}){more}", flush=True)
-                last_hold = state
-
+            self.report_blocked(blocked)
         if ready and under_cap and not settling:
-            name, head = ready
+            self.try_launch(*ready)
+        return True
 
-            total, used = gpu_total_used()
-            free = (total - used) if total else 10 ** 9
-            need = measure(head["probe"], head["vram"], free)
-            # Re-read: the probe itself allocated and released while we were measuring.
-            total, used = gpu_total_used()
-            free = (total - used) if total else 10 ** 9
-            ram_free = host_free_mb()
-            ram_need = head["ram"]
 
-            gpu_ok = free >= need + a.margin
-            ram_ok = ram_free >= ram_need + a.ram_margin
+def main():
+    args = parse_args()
+    for d in (PENDING, RUNNING, DONE, FAILED, LOGS, OUTCOMES):
+        os.makedirs(d, exist_ok=True)
+    acquire_lock(args.force)
 
-            if gpu_ok and ram_ok:
-                running.append(launch(name, need))
-                last_launch = time.time()
-            else:
-                # Only when the situation changes: a job can wait out a long training,
-                # and repeating the same line every poll buries everything else.
-                state = (name, len(running), gpu_ok, ram_ok)
-                if state != last_hold:
-                    why = ("GPU" if not gpu_ok else "") + ("+" if not gpu_ok and not ram_ok else "") \
-                          + ("RAM" if not ram_ok else "")
-                    print(f"[{datetime.now():%H:%M:%S}] hold   {name} on {why}: "
-                          f"needs {need} MiB VRAM ({free} free), "
-                          f"{ram_need} MiB RAM ({ram_free} free) "
-                          f"({len(running)} running)", flush=True)
-                    last_hold = state
+    scheduler = Scheduler(args, recover_previous_jobs())
+    total, _ = gpu_total_used()
+    cap = args.max_jobs if args.max_jobs else "unlimited"
+    print(f"GPU total {total} MiB   concurrency {cap}   margin {args.margin} MiB\n")
 
-        time.sleep(a.poll)
+    while scheduler.step():
+        time.sleep(args.poll)
 
     print("\nqueue empty")
 

@@ -1,43 +1,35 @@
-"""Native-resolution crops around phase 1's predicted band, for phase 2 training/eval.
+"""Native-resolution crops around a first pass's predicted band, everything the refiner needs per case.
 
-The prior is a reference passed in (--prior-dir): any phase 1's saved predictions,
-<prior_dir>/<cid>.npz with sdf + affine at native resolution. This approach's own
-phase 1 predictions written by make_priors.py (plain x4 or size-normalised, single seed
-or ensemble + TTA).
-Reads cache/x1 + cache/label, crops a tight box around the band plus a padding margin,
-and saves everything phase 2 needs in one place.
-
-    python boundary_refiner/make_priors.py --seeds 42
-    python boundary_refiner/make_crops.py \\
-        --prior-dir boundary_refiner/priors/x4_s42 \\
-        --out-dir boundary_refiner/crops/x4_s42
-
-    boundary_refiner/crops/<run>/<cid>.npz:
-        img          native image, cropped, re-normalised within the crop
-        sdf_prior    phase 1's predicted SDF, normalised [-1,1], cropped
-        coarse_mask  sdf_prior < 0 — phase 1's fallback outside the refined band
-        band         |sdf_prior_mm| < band_mm — where phase 2 is allowed to act
-        mask         ground truth, cropped
-        bbox         crop's (lo, hi) per axis in the native volume
-        native_shape the case's full native shape (to place predictions back)
-        spacing      native voxel spacing in mm
-        trunc_mm     the SDF's truncation distance in mm
+The prior (--prior-dir) is any first pass's saved predictions, <prior-dir>/<case>.npz with a native
+SDF and affine, e.g. make_priors.py's. Each crop is a tight box around the prior's interior and band
+plus --padding voxels. <out-dir>/<case>.npz holds:
+    img           native image, cropped, re-normalised within the crop
+    sdf_prior     the prior's SDF, normalised, cropped
+    sdf_true      the true SDF, cropped
+    coarse_mask   sdf_prior < 0: the answer outside the refined band
+    band          |sdf_prior| < band_mm: where the refiner may act
+    mask          ground truth, cropped
+    bbox          the crop's (lo, hi) per axis in the native volume
+    native_shape, spacing, trunc_mm
 """
-
 import argparse
 import glob
 import os
-import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # the repository root
-from common.paths import NATIVE_CACHE  # noqa: E402
+from common.geometry import voxel_spacing
+from common.image_cache import load as load_image, load_label
+from common.paths import NATIVE_CACHE
+from common.sdf_targets import TRUNC_MM, load as load_sdf_target
 
-from common.image_cache import load as load_image, load_label  # noqa: E402
-from common.sdf_targets import load as load_sdf_target  # noqa: E402
+from boundary_refiner.dataset import BAND_MM
 
-TRUNC_MM = 10.0
+USAGE = """\
+example:
+  python boundary_refiner/make_priors.py --seeds 42
+  python boundary_refiner/make_crops.py --prior-dir boundary_refiner/priors/x4_s42 \\
+      --out-dir boundary_refiner/crops/x4_s42"""
 
 
 def normalize(img: np.ndarray) -> np.ndarray:
@@ -53,84 +45,70 @@ def bbox_from_mask(mask: np.ndarray, padding: int) -> list[tuple[int, int]]:
         return [(0, s) for s in mask.shape]
     mins, maxs = coords.min(axis=0), coords.max(axis=0)
     return [(max(0, int(lo) - padding), min(s, int(hi) + padding + 1))
-           for lo, hi, s in zip(mins, maxs, mask.shape)]
+            for lo, hi, s in zip(mins, maxs, mask.shape)]
 
 
 def build_one(cid: str, cache_dir: str, prior_dir: str, out_dir: str,
-             padding: int, band_mm: float, trunc_mm: float, verbose: bool = False):
+              padding: int, band_mm: float, trunc_mm: float, verbose: bool = False):
     img_native, native_affine = load_image(cache_dir, cid, 1)
     label, _ = load_label(cache_dir, cid)
-    mask_native = (label[0] if label.ndim == 4 else label).astype(bool)
+    mask_native = label.astype(bool)
     native_shape = img_native.shape
-    spacing = np.abs(np.diag(native_affine[:3, :3]))
 
-    pred = np.load(os.path.join(prior_dir, f"{cid}.npz"))
-    sdf_prior = pred["sdf"].astype(np.float32)  # normalised [-1, 1], native resolution
+    with np.load(os.path.join(prior_dir, f"{cid}.npz")) as prediction:
+        sdf_prior = prediction["sdf"].astype(np.float32)
     sdf_mm = sdf_prior * trunc_mm
 
-    # Same rule as v1: crop around interior + band, so padding smaller than band_mm
-    # still can't clip the outer half of the band.
+    # Around interior + band, so a padding smaller than band_mm still cannot clip the band's outer half.
     bbox = bbox_from_mask(sdf_mm < band_mm, padding)
-    slices = tuple(slice(lo, hi) for lo, hi in bbox)
+    box = tuple(slice(lo, hi) for lo, hi in bbox)
 
-    img_crop   = normalize(img_native[slices])
-    mask_crop  = mask_native[slices].astype(np.uint8)
-    prior_crop = sdf_prior[slices].astype(np.float32)
-
-    # The true field, for a refiner that regresses a corrected SDF rather than
-    # classifying voxels. A binary target forces a hard call on the voxels either side
-    # of the contour, which is exactly where the annotation is least certain; a distance
-    # field carries "how far, which side" there instead, and the boundary it implies is
-    # set by many voxels at once rather than one.
     sdf_true, _ = load_sdf_target(cache_dir, cid, 1)
-    sdf_true = sdf_true[0] if sdf_true.ndim == 4 else sdf_true
-    true_crop = sdf_true[slices].astype(np.float32)
-
-    coarse_crop = (prior_crop < 0).astype(np.uint8)
-    band_crop   = (np.abs(sdf_mm[slices]) < band_mm).astype(np.uint8)
+    prior_crop = sdf_prior[box].astype(np.float32)
+    band_crop = (np.abs(sdf_mm[box]) < band_mm).astype(np.uint8)
 
     os.makedirs(out_dir, exist_ok=True)
-    # Uncompressed: zlib over a native-resolution crop costs 484ms to load against
-    # 142ms, and inference spends more time decompressing than running the network.
-    # Disk is the cheaper resource here - 200 MB a case rather than 60.
+    # Uncompressed: zlib made a crop load in 484 ms instead of 142, more than the network takes.
     np.savez(
         os.path.join(out_dir, f"{cid}.npz"),
-        img=img_crop, sdf_prior=prior_crop, sdf_true=true_crop,
-        coarse_mask=coarse_crop, band=band_crop, mask=mask_crop,
+        img=normalize(img_native[box]), sdf_prior=prior_crop, sdf_true=sdf_true[box].astype(np.float32),
+        coarse_mask=(prior_crop < 0).astype(np.uint8), band=band_crop,
+        mask=mask_native[box].astype(np.uint8),
         bbox=np.array(bbox, dtype=np.int32),
         native_shape=np.array(native_shape, dtype=np.int32),
-        spacing=np.array(spacing, dtype=np.float32),
+        spacing=np.array(voxel_spacing(native_affine), dtype=np.float32),
         trunc_mm=np.float32(trunc_mm),
     )
 
     if verbose:
         crop_shape = tuple(hi - lo for lo, hi in bbox)
         print(f"  {cid[:44]:<44}  native={native_shape}  crop={crop_shape}"
-             f"  band={band_crop.sum():,}vox", flush=True)
+              f"  band={band_crop.sum():,}vox", flush=True)
 
 
 def main():
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--prior-dir", type=str, required=True,
-                   help="the reference prior: a phase 1's native SDF predictions "
-                        "(written by make_priors.py)")
-    p.add_argument("--cache-dir", type=str, default=NATIVE_CACHE)
-    p.add_argument("--out-dir",   type=str, required=True)
-    p.add_argument("--padding",   type=int, default=10, help="voxel margin around the band bbox")
-    p.add_argument("--band-mm",   type=float, default=5.0)
-    p.add_argument("--trunc-mm",  type=float, default=TRUNC_MM)
-    a = p.parse_args()
+    parser = argparse.ArgumentParser(description=__doc__, epilog=USAGE,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--prior-dir", type=str, required=True,
+                        help="the reference prior: a first pass's native SDF predictions (make_priors.py)")
+    parser.add_argument("--cache-dir", type=str, default=NATIVE_CACHE)
+    parser.add_argument("--out-dir", type=str, required=True)
+    parser.add_argument("--padding", type=int, default=10, help="voxel margin around the band bbox")
+    parser.add_argument("--band-mm", type=float, default=BAND_MM)
+    parser.add_argument("--trunc-mm", type=float, default=TRUNC_MM)
+    args = parser.parse_args()
 
-    cids = sorted(os.path.basename(f)[:-4] for f in glob.glob(os.path.join(a.prior_dir, "*.npz")))
-    print(f"{len(cids)} cases from prior {a.prior_dir} -> {a.out_dir}\n"
-          f"padding={a.padding}vox  band_mm={a.band_mm}\n", flush=True)
+    priors = glob.glob(os.path.join(args.prior_dir, "*.npz"))
+    cids = sorted(os.path.splitext(os.path.basename(f))[0] for f in priors)
+    print(f"{len(cids)} cases from prior {args.prior_dir} -> {args.out_dir}\n"
+          f"padding={args.padding}vox  band_mm={args.band_mm}\n", flush=True)
 
     for i, cid in enumerate(cids, start=1):
         print(f"[{i}/{len(cids)}]", end="", flush=True)
-        build_one(cid, a.cache_dir, a.prior_dir, a.out_dir, a.padding, a.band_mm, a.trunc_mm, verbose=True)
+        build_one(cid, args.cache_dir, args.prior_dir, args.out_dir, args.padding, args.band_mm, args.trunc_mm,
+                  verbose=True)
 
-    print(f"\n{len(cids)} crops created -> {a.out_dir}")
+    print(f"\n{len(cids)} crops created -> {args.out_dir}")
 
 
 if __name__ == "__main__":
