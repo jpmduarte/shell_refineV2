@@ -17,8 +17,8 @@ from monai.data import MetaTensor
 
 from common.geometry import CUBE, FACTOR, MM3_PER_ML, downsample, isotropic_spacing, voxel_spacing
 from common.image_cache import case_ids, load, load_label
-from common.paths import NATIVE_CACHE, NORM_CACHE
 from common.sdf_targets import TRUNC_MM, signed_distance_mm
+from datasets import add_dataset_argument, get as get_dataset
 
 CUBE_FIT_MARGIN = 1.005   # for the shape's rounding when a case is coarsened to fit the cube
 LINKED_FROM_NATIVE = ["x1", "label", os.path.join("sdf", "x1")]   # predictions go back to native via the affine
@@ -95,12 +95,16 @@ def normalise_case(src, cid, v0):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, epilog=LAYOUT,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--src", default=NATIVE_CACHE)
-    parser.add_argument("--dst", default=NORM_CACHE)
+    add_dataset_argument(parser)
+    parser.add_argument("--src", default=None, help="default: the dataset's cache")
+    parser.add_argument("--dst", default=None, help="default: the dataset's size-normalised cache")
     parser.add_argument("--v0-ml", type=float, default=None,
                         help="override V0; default: the median head volume of the labels")
     parser.add_argument("--limit", type=int, default=0, help="only the first N cases (testing)")
     args = parser.parse_args()
+    dataset = get_dataset(args.dataset)
+    args.src = args.src or dataset.cache
+    args.dst = args.dst or dataset.norm_cache
 
     ids = case_ids(args.src)[:args.limit or None]
     v0 = args.v0_ml if args.v0_ml is not None else float(np.median([label_volume_ml(args.src, cid) for cid in ids]))

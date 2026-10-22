@@ -5,7 +5,7 @@ Everything since the folds were regrouped by patient (commit `5f3bc7d`). The old
 
 ## Protocol
 
-- 90 volumes, 5-fold cross-validation grouped by patient (`splits.json`); nnU-Net trained on
+- 90 volumes, 5-fold cross-validation grouped by patient (`datasets/fetal_head/splits.json`); nnU-Net trained on
   the same folds (`nnunet/runs/grouped_*`).
 - Dice, HD95 (mm), ASD (mm) at native resolution against the label.
 - Our numbers are the last epoch (nothing selected on the reported fold), and the

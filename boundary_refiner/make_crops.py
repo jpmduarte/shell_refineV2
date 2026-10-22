@@ -20,8 +20,8 @@ import numpy as np
 
 from common.geometry import voxel_spacing
 from common.image_cache import load as load_image, load_label
-from common.paths import NATIVE_CACHE
 from common.sdf_targets import TRUNC_MM, load as load_sdf_target
+from datasets import add_dataset_argument, get as get_dataset
 
 from boundary_refiner.dataset import BAND_MM
 
@@ -91,12 +91,14 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--prior-dir", type=str, required=True,
                         help="the reference prior: a first pass's native SDF predictions (make_priors.py)")
-    parser.add_argument("--cache-dir", type=str, default=NATIVE_CACHE)
+    add_dataset_argument(parser)
+    parser.add_argument("--cache-dir", type=str, default=None, help="default: the dataset's cache")
     parser.add_argument("--out-dir", type=str, required=True)
     parser.add_argument("--padding", type=int, default=10, help="voxel margin around the band bbox")
     parser.add_argument("--band-mm", type=float, default=BAND_MM)
     parser.add_argument("--trunc-mm", type=float, default=TRUNC_MM)
     args = parser.parse_args()
+    args.cache_dir = args.cache_dir or get_dataset(args.dataset).cache
 
     priors = glob.glob(os.path.join(args.prior_dir, "*.npz"))
     cids = sorted(os.path.splitext(os.path.basename(f))[0] for f in priors)

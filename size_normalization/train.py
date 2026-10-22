@@ -14,9 +14,9 @@ from common.image_cache import case_ids
 from common.loss import SURFACE_SIGMA_MM, surface_weighted_l1
 from common.metrics import BOUNDARY_BAND_MM, boundary_dice_from_sdf, dice_from_sdf, mae
 from common.model import UNet3D
-from common.paths import NORM_CACHE, SIZE_NORM_RUNS, SPLITS_JSON
 from common.profiler import Profiler, model_summary
 from common.seeding import loader_generator, make_deterministic, seed_worker
+from datasets import add_dataset_argument, get as get_dataset
 from size_normalization.dataset import SDFDataset
 
 INNER_VAL_SEED = 0   # the same held-out cases for every seed of a fold
@@ -24,11 +24,12 @@ LOG_HEADER = "epoch,train_loss,val_loss,val_mae,val_dice,val_boundary_dice,train
 
 USAGE = """\
 examples:
-  the size-normalised network (pass 2, on caches/cache_norm4):
+  the size-normalised network (pass 2, on the dataset's size-normalised cache):
     python size_normalization/train.py --fold 0 --seed 42 --run-dir size_normalization/runs/x4norm_s42/fold0
   the plain x4 network (pass 1, which estimates the head volume):
-    python size_normalization/train.py --fold 0 --seed 42 --cache-dir caches/cache \\
-        --run-dir size_normalization/runs/x4_s42/fold0
+    python size_normalization/train.py --fold 0 --seed 42 --plain --run-dir size_normalization/runs/x4_s42/fold0
+  another dataset:
+    python size_normalization/train.py --dataset cetus --fold 0 --seed 42 --plain --run-dir runs/cetus/x4_s42/fold0
 
 writes <run-dir>/config.json, train_log.csv (one row per epoch) and checkpoints/phase1_last.pth"""
 
@@ -131,22 +132,30 @@ def parse_args():
                              "every seed) as an inner validation set, validate on it instead of the "
                              "fold, and also save the epoch with its best Dice as phase1_best.pth")
     parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--cache-dir", type=str, default=NORM_CACHE)
-    parser.add_argument("--splits-json", type=str, default=SPLITS_JSON)
-    parser.add_argument("--run-dir", type=str, default=None,
-                        help="default: size_normalization/runs/fold<k>")
-    return parser.parse_args()
+    add_dataset_argument(parser)
+    parser.add_argument("--plain", action="store_true",
+                        help="train the plain x4 network (pass 1) on the dataset's cache, not its size-normalised one")
+    parser.add_argument("--cache-dir", type=str, default=None,
+                        help="default: the dataset's size-normalised cache (its plain cache with --plain)")
+    parser.add_argument("--splits-json", type=str, default=None, help="default: the dataset's splits.json")
+    parser.add_argument("--run-dir", type=str, default=None, help="default: <the dataset's runs>/fold<k>")
+    args = parser.parse_args()
+    dataset = get_dataset(args.dataset)
+    args.cache_dir = args.cache_dir or (dataset.cache if args.plain else dataset.norm_cache)
+    args.splits_json = args.splits_json or dataset.splits_json
+    args.run_dir = args.run_dir or os.path.join(dataset.runs, f"fold{args.fold}")
+    return args
 
 
-def split_cases(args) -> tuple[list[str], list[str], list[str] | None]:
+def split_cases(args, dataset) -> tuple[list[str], list[str], list[str] | None]:
     """(training, validation, the inner validation set or None)."""
-    folds = get_folds(case_ids(args.cache_dir), n_folds=args.n_folds, seed=FOLDS_SEED,
+    folds = get_folds(dataset, case_ids(args.cache_dir), n_folds=args.n_folds, seed=FOLDS_SEED,
                       splits_json=args.splits_json)
     train_ids, val_ids = fold_split(folds, args.fold)
     if not args.inner_val:
         return train_ids, val_ids, None
     # Out of the training cases, by patient: the best epoch is chosen without seeing the reported fold.
-    inner = make_folds(train_ids, n_folds=args.inner_val, seed=INNER_VAL_SEED)[0]
+    inner = make_folds(train_ids, dataset.patient_of, n_folds=args.inner_val, seed=INNER_VAL_SEED)[0]
     train_ids = [c for c in train_ids if c not in set(inner)]
     return train_ids, inner, inner
 
@@ -163,7 +172,8 @@ def log_row(epoch, train: TrainScores, val: ValScores) -> str:
 
 def main():
     args = parse_args()
-    run_dir = args.run_dir or os.path.join(SIZE_NORM_RUNS, f"fold{args.fold}")
+    dataset = get_dataset(args.dataset)
+    run_dir = args.run_dir
     os.makedirs(run_dir, exist_ok=True)
 
     if args.seed is not None:
@@ -173,7 +183,7 @@ def main():
     print(f"Device: {device}  Fold: {args.fold}  Run: {run_dir}")
     print(f"Loss: L1 + {args.sw_coef} x surface-weighted L1 @ {args.sw_sigma}mm  cache: {args.cache_dir}")
 
-    train_ids, val_ids, inner = split_cases(args)
+    train_ids, val_ids, inner = split_cases(args, dataset)
     print(f"Train: {len(train_ids)}  Val: {len(val_ids)}" + ("  (inner validation)" if inner else ""))
 
     config = {"base_ch": args.base_ch, "scale_p": args.scale_p, "scale_range": args.scale_range}

@@ -13,7 +13,7 @@ import torch
 from common.folds import SEED as FOLDS_SEED, fold_split, get_folds
 from common.geometry import CUBE, FACTOR, MM3_PER_ML, isotropic_spacing
 from common.image_cache import case_ids, load as load_image, load_label
-from common.paths import NATIVE_CACHE, NORM_CACHE, SPLITS_JSON
+from datasets import add_dataset_argument, get as get_dataset
 from size_normalization.build_cache import reference_v0
 from size_normalization.infer import load_net, segment, segment_plain
 
@@ -41,17 +41,22 @@ def parse_args():
                         help="normalise with the label's head volume instead of pass 1's estimate")
     parser.add_argument("--blend", type=float, default=0.0,
                         help="weight of pass 1's SDF in the final one (0 = off; 0.25 tested)")
-    parser.add_argument("--reference", type=str, default=NORM_CACHE,
-                        help="the pass-2 networks' training cache: its norm.json gives V0")
+    parser.add_argument("--reference", type=str, default=None,
+                        help="the pass-2 networks' training cache, whose norm.json gives V0; default: the dataset's")
     parser.add_argument("--case", type=str, default=None, help="a single case id")
     parser.add_argument("--all", action="store_true", help="every cached case")
     parser.add_argument("--fold", type=int, default=None, help="one fold's cases")
     parser.add_argument("--split", type=str, default="val", choices=["train", "val"])
     parser.add_argument("--n-folds", type=int, default=5)
-    parser.add_argument("--splits-json", type=str, default=SPLITS_JSON)
-    parser.add_argument("--cache-dir", type=str, default=NATIVE_CACHE, help="the native cache (x1, label)")
+    parser.add_argument("--splits-json", type=str, default=None, help="default: the dataset's splits.json")
+    parser.add_argument("--cache-dir", type=str, default=None, help="the native cache (x1, label); default: the dataset's")
     parser.add_argument("--out-dir", type=str, required=True)
+    add_dataset_argument(parser)
     args = parser.parse_args()
+    dataset = get_dataset(args.dataset)
+    args.reference = args.reference or dataset.norm_cache
+    args.splits_json = args.splits_json or dataset.splits_json
+    args.cache_dir = args.cache_dir or dataset.cache
 
     if sum(x is not None for x in (args.case, args.fold)) + int(args.all) != 1:
         parser.error("pass exactly one of --case <cid>, --all, or --fold <k>")
@@ -62,7 +67,7 @@ def parse_args():
 
 def select_cases(args) -> list[str]:
     if args.fold is not None:
-        folds = get_folds(case_ids(args.cache_dir), n_folds=args.n_folds, seed=FOLDS_SEED,
+        folds = get_folds(get_dataset(args.dataset), case_ids(args.cache_dir), n_folds=args.n_folds, seed=FOLDS_SEED,
                           splits_json=args.splits_json)
         train_ids, val_ids = fold_split(folds, args.fold)
         return val_ids if args.split == "val" else train_ids
@@ -78,6 +83,7 @@ def oracle_volume_ml(cache_dir, cid, aff1) -> float:
 
 def main():
     args = parse_args()
+    dataset = get_dataset(args.dataset)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     models = [load_net(c, device) for c in args.checkpoint]
@@ -98,7 +104,7 @@ def main():
         if args.pass1:
             volume = oracle_volume_ml(args.cache_dir, cid, aff1) if args.oracle else None
             field, estimate = segment(img1, aff1, pass1, models, v0_ml, args.tta, device,
-                                      blend=args.blend, volume=volume)
+                                      blend=args.blend, k_range=dataset.k_range, volume=volume)
             pass1_record = dataclasses.asdict(estimate)
         else:
             field = segment_plain(img1, aff1, models, args.tta, device)

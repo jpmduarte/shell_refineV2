@@ -15,7 +15,6 @@ from scipy.ndimage import distance_transform_edt
 
 from common.geometry import FACTOR, downsample, voxel_spacing
 from common.image_cache import FACTORS, case_ids, load_label
-from common.paths import NATIVE_CACHE
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -106,15 +105,20 @@ def load_mm(cache_dir, cid, factor=FACTOR):
 
 
 if __name__ == "__main__":
+    from datasets import add_dataset_argument, get as get_dataset
+
     parser = argparse.ArgumentParser(
         description="Build the SDF targets from the cached labels: sdf/x1 and sdf/x4, normalised and truncated.")
-    parser.add_argument("--cache-dir", default=NATIVE_CACHE)
-    parser.add_argument("--out-dir", default=os.path.join(NATIVE_CACHE, "sdf"))
+    parser.add_argument("--cache-dir", default=None, help="default: the dataset's cache")
+    parser.add_argument("--out-dir", default=None, help="default: <cache-dir>/sdf")
     parser.add_argument("--truncation-mm", type=float, default=TRUNC_MM)
     parser.add_argument("--limit", type=int, default=0, help="only the first N cases (testing)")
     parser.add_argument("--untruncated", action="store_true",
                         help="write the untruncated mm field at x4 to <cache-dir>/sdf/x4mm instead")
+    add_dataset_argument(parser)
     args = parser.parse_args()
+    args.cache_dir = args.cache_dir or get_dataset(args.dataset).cache
+    args.out_dir = args.out_dir or os.path.join(args.cache_dir, "sdf")
     if args.untruncated:
         build_mm(args.cache_dir, FACTOR, args.limit)
     else:

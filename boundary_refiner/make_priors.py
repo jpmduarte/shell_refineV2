@@ -15,10 +15,10 @@ from numpy.lib import format as npy_format
 from common.folds import N_FOLDS, SEED as FOLDS_SEED, fold_split, get_folds
 from common.geometry import FACTOR
 from common.image_cache import case_ids, load as load_image
-from common.paths import LAST_CHECKPOINT, NATIVE_CACHE, PASS1_RUN, REFINER_DIR, SIZE_NORM_RUNS, SPLITS_JSON
+from common.paths import REFINER_DIR
+from datasets import add_dataset_argument, get as get_dataset
 from size_normalization.infer import forward, load_net, to_native_as_cache
 
-DEFAULT_CHECKPOINT = os.path.join(SIZE_NORM_RUNS, PASS1_RUN + "_s{s}", "fold{f}", "checkpoints", LAST_CHECKPOINT)
 
 USAGE = """\
 examples:
@@ -63,19 +63,24 @@ def main():
     parser.add_argument("--seeds", type=int, nargs="+", default=[42],
                         help="one seed, or several: their SDFs are averaged (an ensemble)")
     parser.add_argument("--tta", action="store_true", help="average the 8 mirrored predictions")
-    parser.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT,
-                        help="checkpoint path pattern, with {s} for the seed and {f} for the fold")
-    parser.add_argument("--cache-dir", default=NATIVE_CACHE,
-                        help="the grid the networks read; may contain {s} for a cache per seed")
-    parser.add_argument("--splits-json", default=SPLITS_JSON)
+    add_dataset_argument(parser)
+    parser.add_argument("--checkpoint", default=None,
+                        help="checkpoint path pattern, with {s} for the seed and {f} for the fold; "
+                             "default: the dataset's pass-1 run")
+    parser.add_argument("--cache-dir", default=None,
+                        help="the grid the networks read; may contain {s} for a cache per seed; default: the dataset's")
+    parser.add_argument("--splits-json", default=None, help="default: the dataset's splits.json")
     parser.add_argument("--out-dir", default=None,
                         help="default: priors/x4_s<seed> (or x4_ens_s42-43-44, with _tta) here")
     args = parser.parse_args()
+    dataset = get_dataset(args.dataset)
+    args.checkpoint = args.checkpoint or dataset.checkpoint(dataset.pass1_run, "{s}", "{f}")
+    args.cache_dir = args.cache_dir or dataset.cache
 
     out_dir = output_dir(args)
     os.makedirs(out_dir, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    folds = get_folds(case_ids(args.cache_dir.format(s=args.seeds[0])), n_folds=N_FOLDS, seed=FOLDS_SEED,
+    folds = get_folds(dataset, case_ids(args.cache_dir.format(s=args.seeds[0])), n_folds=N_FOLDS, seed=FOLDS_SEED,
                       splits_json=args.splits_json)
 
     for k in range(len(folds)):

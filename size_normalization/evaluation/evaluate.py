@@ -14,8 +14,8 @@ import torch
 from common.geometry import voxel_spacing
 from common.image_cache import load_label
 from common.metrics import asd, dice, dice_from_sdf, hd95, mae
-from common.paths import NATIVE_CACHE
 from common.sdf_targets import load as load_sdf_target
+from datasets import add_dataset_argument, get as get_dataset
 
 METRICS = ["mae", "dice_sdf", "dice_label", "hd95", "asd"]
 RULE = "-" * 88
@@ -88,9 +88,11 @@ def mean_std(scores):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--pred-dir", type=str, required=True, help="predict.py's output folder")
-    parser.add_argument("--cache-dir", type=str, default=NATIVE_CACHE)
+    parser.add_argument("--cache-dir", type=str, default=None, help="default: the dataset's cache")
     parser.add_argument("--out-dir", type=str, required=True)
+    add_dataset_argument(parser)
     args = parser.parse_args()
+    args.cache_dir = args.cache_dir or get_dataset(args.dataset).cache
 
     os.makedirs(args.out_dir, exist_ok=True)
     results = evaluate(args.pred_dir, args.cache_dir)

@@ -15,9 +15,10 @@ from boundary_refiner.dataset import CUBE, PATCHES_PER_CASE, CubeDataset, collat
 from boundary_refiner.refiner_model import RefinerUNet
 from boundary_refiner.train import train_epoch, val_epoch
 from common.folds import SEED as FOLDS_SEED, fold_split, get_folds
-from common.paths import REFINER_DIR, SPLITS_JSON
+from common.paths import REFINER_DIR
 from common.profiler import Profiler, model_summary
 from common.seeding import loader_generator, make_deterministic, seed_worker
+from datasets import add_dataset_argument, get as get_dataset
 
 LOG_HEADER = "epoch,train_loss,val_loss,val_band_dice\n"
 
@@ -47,7 +48,8 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--resume-every", type=int, default=10,
                         help="save a resume checkpoint every this many epochs; 0 = never")
-    parser.add_argument("--splits-json", type=str, default=SPLITS_JSON)
+    add_dataset_argument(parser)
+    parser.add_argument("--splits-json", type=str, default=None, help="default: the dataset's splits.json")
     parser.add_argument("--run-dir", type=str, default=None)
     args = parser.parse_args()
 
@@ -65,7 +67,8 @@ def available_cases(crops_dir) -> list[str]:
 def split_cases(args) -> tuple[list[str], list[str]]:
     """The shared patient-grouped folds, restricted to the cases that have a crop."""
     available = available_cases(args.crops_dir)
-    folds = get_folds(available, n_folds=args.n_folds, seed=FOLDS_SEED, splits_json=args.splits_json)
+    folds = get_folds(get_dataset(args.dataset), available, n_folds=args.n_folds, seed=FOLDS_SEED,
+                      splits_json=args.splits_json)
     train_ids, val_ids = fold_split(folds, args.fold)
     return [c for c in train_ids if c in set(available)], [c for c in val_ids if c in set(available)]
 

@@ -11,12 +11,11 @@ import numpy as np
 import torch
 
 from common.geometry import MM3_PER_ML, SPATIAL
-from common.paths import NORM_CACHE, PASS1_RUN, PASS2_RUN, run_checkpoint
+from datasets import add_dataset_argument, get as get_dataset
 from size_normalization.build_cache import reference_v0
-from size_normalization.infer import K_RANGE, load_net, segment
+from size_normalization.infer import load_net, segment
 
-DEFAULT_PASS1 = run_checkpoint(PASS1_RUN, seed=42, fold=0)
-DEFAULT_PASS2 = run_checkpoint(PASS2_RUN, seed=42, fold=0)
+DEFAULT_SEED, DEFAULT_FOLD = 42, 0
 OBLIQUE_TOLERANCE = 1e-4
 ISOTROPY_TOLERANCE = 1e-3
 
@@ -63,14 +62,20 @@ def main():
     parser.add_argument("image", help="input NIfTI (.nii or .nii.gz)")
     parser.add_argument("mask", help="output mask NIfTI (1 inside the head, 0 outside)")
     parser.add_argument("--sdf", default=None, help="also write the predicted SDF (mm / 10, negative inside)")
-    parser.add_argument("--pass1", default=DEFAULT_PASS1)
-    parser.add_argument("--pass2", nargs="+", default=[DEFAULT_PASS2], help="several are averaged (the ensemble)")
+    parser.add_argument("--pass1", default=None, help="default: the dataset's pass-1 run, seed 42, fold 0")
+    parser.add_argument("--pass2", nargs="+", default=None,
+                        help="several are averaged (the ensemble); default: the dataset's pass-2 run, seed 42, fold 0")
     parser.add_argument("--tta", action="store_true", help="average the 8 mirrorings")
     parser.add_argument("--v0-ml", type=float, default=None,
                         help="the canonical head volume pass 2 was trained at; default: from --reference")
-    parser.add_argument("--reference", default=NORM_CACHE,
-                        help="pass 2's training cache, whose norm.json gives V0")
+    parser.add_argument("--reference", default=None,
+                        help="pass 2's training cache, whose norm.json gives V0; default: the dataset's")
+    add_dataset_argument(parser)
     args = parser.parse_args()
+    dataset = get_dataset(args.dataset)
+    args.pass1 = args.pass1 or dataset.checkpoint(dataset.pass1_run, DEFAULT_SEED, DEFAULT_FOLD)
+    args.pass2 = args.pass2 or [dataset.checkpoint(dataset.pass2_run, DEFAULT_SEED, DEFAULT_FOLD)]
+    args.reference = args.reference or dataset.norm_cache
 
     img, img1, aff1, spacing = load_ras_volume(args.image)
 
@@ -79,7 +84,7 @@ def main():
     pass2 = [load_net(c, device) for c in args.pass2]
     v0_ml = args.v0_ml if args.v0_ml is not None else reference_v0(args.reference)
 
-    field, estimate = segment(img1, aff1, pass1, pass2, v0_ml, args.tta, device)
+    field, estimate = segment(img1, aff1, pass1, pass2, v0_ml, args.tta, device, k_range=dataset.k_range)
     field = field.cpu().numpy().astype(np.float32)
     mask = (field < 0).astype(np.uint8)
 
@@ -88,7 +93,8 @@ def main():
         save_like(field, np.float32, img, args.sdf)
 
     head_ml = float(mask.sum()) * float(np.prod(spacing)) / MM3_PER_ML
-    kept = f", outside {K_RANGE[0]}-{K_RANGE[1]:g}: pass 1's segmentation kept" if estimate.fallback else ""
+    low, high = dataset.k_range
+    kept = f", outside {low}-{high:g}: pass 1's segmentation kept" if estimate.fallback else ""
     print(f"{args.image}: {img1.shape} at {spacing[0]:.2f} mm; pass 1 {estimate.volume_ml:.1f} mL "
           f"(k = {estimate.k:.3f}{kept}); head {head_ml:.1f} mL -> {args.mask}")
 

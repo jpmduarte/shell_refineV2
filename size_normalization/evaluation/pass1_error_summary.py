@@ -6,7 +6,7 @@ import os
 import numpy as np
 from scipy.stats import spearmanr
 
-from common.paths import SIZE_NORM_RUNS
+from datasets import add_dataset_argument, get as get_dataset
 
 BREAKDOWN_SEED = "42"   # a JSON key
 LARGE_ERROR = 0.05
@@ -17,8 +17,10 @@ N_WORST = 10
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--json", default=os.path.join(SIZE_NORM_RUNS, "pass1_error_analysis.json"))
+    add_dataset_argument(parser)
+    parser.add_argument("--json", default=None, help="default: <the dataset's runs>/pass1_error_analysis.json")
     args = parser.parse_args()
+    args.json = args.json or os.path.join(get_dataset(args.dataset).runs, "pass1_error_analysis.json")
     with open(args.json) as f:
         rows = json.load(f)
     true = np.array([r["true_ml"] for r in rows])

@@ -17,8 +17,8 @@ import torch
 from boundary_refiner.dataset import CUBE, cube_slices, pad_to_shape
 from boundary_refiner.refiner_model import RefinerUNet
 from common.folds import SEED as FOLDS_SEED, fold_split, get_folds
-from common.paths import SPLITS_JSON
 from common.profiler import Profiler, model_summary
+from datasets import add_dataset_argument, get as get_dataset
 
 SPATIAL_DIMS = (2, 3, 4)   # of a (batch, channel, z, y, x) block
 FLIPS = [[dim for dim, flip in zip(SPATIAL_DIMS, flips) if flip] for flips in itertools.product((0, 1), repeat=3)]
@@ -116,7 +116,8 @@ def select_cases(args) -> list[str]:
     available = sorted(os.path.splitext(f)[0] for f in os.listdir(args.crops_dir) if f.endswith(".npz"))
     if args.fold is None:
         return available
-    folds = get_folds(available, n_folds=args.n_folds, seed=FOLDS_SEED, splits_json=args.splits_json)
+    folds = get_folds(get_dataset(args.dataset), available, n_folds=args.n_folds, seed=FOLDS_SEED,
+                      splits_json=args.splits_json)
     train_ids, val_ids = fold_split(folds, args.fold)
     wanted = val_ids if args.split == "val" else train_ids
     return [c for c in wanted if c in set(available)]
@@ -138,7 +139,8 @@ def main():
     parser.add_argument("--blend-sigma", type=float, default=0.125,
                         help="Gaussian blending width as a fraction of the cube's side; 0 = uniform")
     parser.add_argument("--tile-batch", type=int, default=8, help="cubes per forward pass")
-    parser.add_argument("--splits-json", type=str, default=SPLITS_JSON)
+    add_dataset_argument(parser)
+    parser.add_argument("--splits-json", type=str, default=None, help="default: the dataset's splits.json")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

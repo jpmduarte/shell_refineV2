@@ -83,7 +83,7 @@ Every scan is read once and stored as plain numpy arrays, so training never touc
   [common/folds.py:25](../common/folds.py#L25). 90 volumes come from 82 patients; scans of the same
   fetus are always in the same fold. *Why:* two scans of one fetus are nearly the same
   image, so one in training and one in validation would inflate the score.
-- Saved once in `splits.json` and reused by every run, so all numbers compare like for
+- Saved once in `datasets/fetal_head/splits.json` and reused by every run, so all numbers compare like for
   like. nnU-Net was trained on the same folds.
 
 ## 4. Size normalisation: `size_normalization/build_cache.py`
@@ -261,7 +261,7 @@ python common/sdf_targets.py --untruncated                               # cache
 python size_normalization/build_cache.py                                            # cache_norm4 (true volumes; V0 = median)
 
 # per fold k and seed s:
-python size_normalization/train.py --fold k --seed s --cache-dir caches/cache --run-dir size_normalization/runs/x4_s<s>/fold<k>
+python size_normalization/train.py --fold k --seed s --plain --run-dir size_normalization/runs/x4_s<s>/fold<k>
 python size_normalization/train.py --fold k --seed s --run-dir size_normalization/runs/x4norm_s<s>/fold<k>
 
 # evaluation, the method as deployed (pass 1's volume, from the native image):

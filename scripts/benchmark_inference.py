@@ -17,12 +17,12 @@ import torch
 from common.folds import N_FOLDS, SEED as FOLDS_SEED, fold_split, get_folds
 from common.image_cache import case_ids, load as load_image, load_label
 from common.metrics import mask_dice
-from common.paths import LAST_CHECKPOINT, NATIVE_CACHE, NORM_CACHE, PASS1_RUN, PASS2_RUN, ROOT, SPLITS_JSON
+from common.paths import ROOT
+from datasets import add_dataset_argument, get as get_dataset
 from size_normalization.build_cache import reference_v0
 from size_normalization.infer import FLIPS, Clock, load_net, segment, segment_plain
 
 MB = 2 ** 20
-RUN_PATTERN = "size_normalization/runs/{run}_s{{s}}/fold{{f}}/checkpoints/" + LAST_CHECKPOINT
 SEED_OF_PASS1 = 42
 
 USAGE = """\
@@ -54,11 +54,13 @@ def parse_args():
                         help="timed passes over the cases; the spread between them shows the run-to-run noise")
     parser.add_argument("--limit", type=int, default=0, help="only the first N cases of each fold")
     parser.add_argument("--warmup", type=int, default=2, help="untimed cases run first")
-    parser.add_argument("--pass1", default=RUN_PATTERN.format(run=PASS1_RUN))
-    parser.add_argument("--pass2", default=RUN_PATTERN.format(run=PASS2_RUN), help="the second-pass networks")
-    parser.add_argument("--cache-dir", default=NATIVE_CACHE)
-    parser.add_argument("--reference", default=NORM_CACHE,
-                        help="the second pass's training cache: its norm.json gives V0")
+    add_dataset_argument(parser)
+    parser.add_argument("--pass1", default=None,
+                        help="checkpoint pattern with {s} and {f}; default: the dataset's pass-1 run")
+    parser.add_argument("--pass2", default=None, help="the second-pass networks; default: the dataset's pass-2 run")
+    parser.add_argument("--cache-dir", default=None, help="default: the dataset's cache")
+    parser.add_argument("--reference", default=None,
+                        help="the second pass's training cache, whose norm.json gives V0; default: the dataset's")
     parser.add_argument("--resampler", choices=("fast", "geometry"), default="fast")
     parser.add_argument("--blend", type=float, default=0.0,
                         help="weight of pass 1's SDF in the final one (0 = off; 0.25 tested)")
@@ -67,7 +69,13 @@ def parse_args():
     parser.add_argument("--no-plain", action="store_true",
                         help="skip the plain x4 configurations (no size normalisation)")
     parser.add_argument("--out", default=None, help="write the results as JSON here")
-    return parser.parse_args()
+    args = parser.parse_args()
+    dataset = get_dataset(args.dataset)
+    args.pass1 = args.pass1 or dataset.checkpoint(dataset.pass1_run, "{s}", "{f}")
+    args.pass2 = args.pass2 or dataset.checkpoint(dataset.pass2_run, "{s}", "{f}")
+    args.cache_dir = args.cache_dir or dataset.cache
+    args.reference = args.reference or dataset.norm_cache
+    return args
 
 
 def configurations(n_seeds, no_plain) -> dict[str, Configuration]:
@@ -96,7 +104,7 @@ class Benchmark:
         self.fast = args.resampler == "fast"
         self.proc = psutil.Process()
         self.v0_ml = reference_v0(args.reference)
-        folds = get_folds(case_ids(args.cache_dir), n_folds=N_FOLDS, seed=FOLDS_SEED, splits_json=SPLITS_JSON)
+        folds = get_folds(get_dataset(args.dataset), case_ids(args.cache_dir), n_folds=N_FOLDS, seed=FOLDS_SEED)
         self.networks = {f: self._fold_networks(folds, f) for f in args.folds}
         self.params = sum(q.numel() for q in self.networks[args.folds[0]].pass1.parameters())
         self.n_cases = sum(len(n.cases) for n in self.networks.values())

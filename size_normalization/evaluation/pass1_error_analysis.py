@@ -19,8 +19,8 @@ from scipy import ndimage
 from common.folds import N_FOLDS, SEED as FOLDS_SEED, fold_split, get_folds
 from common.geometry import MM3_PER_ML, voxel_spacing
 from common.image_cache import case_ids, load as load_image, load_label
-from common.paths import NATIVE_CACHE, NORM_CACHE, PASS1_RUN, PASS2_RUN, SIZE_NORM_RUNS, SPLITS_JSON, run_checkpoint
 from common.sdf_targets import TRUNC_MM
+from datasets import add_dataset_argument, get as get_dataset
 from size_normalization.build_cache import reference_v0
 from size_normalization.infer import load_net, segment, segment_plain
 
@@ -94,20 +94,25 @@ def print_case(fold, cid, row):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--cache-dir", default=NATIVE_CACHE)
-    parser.add_argument("--reference", default=NORM_CACHE)
+    add_dataset_argument(parser)
+    parser.add_argument("--cache-dir", default=None, help="default: the dataset's cache")
+    parser.add_argument("--reference", default=None, help="default: the dataset's size-normalised cache")
     parser.add_argument("--limit", type=int, default=0, help="only the first N cases per fold (testing)")
-    parser.add_argument("--out", default=os.path.join(SIZE_NORM_RUNS, "pass1_error_analysis.json"))
+    parser.add_argument("--out", default=None, help="default: <the dataset's runs>/pass1_error_analysis.json")
     args = parser.parse_args()
+    dataset = get_dataset(args.dataset)
+    args.cache_dir = args.cache_dir or dataset.cache
+    args.reference = args.reference or dataset.norm_cache
+    args.out = args.out or os.path.join(dataset.runs, "pass1_error_analysis.json")
 
     device = torch.device("cuda")
     v0_ml = reference_v0(args.reference)
-    folds = get_folds(case_ids(args.cache_dir), n_folds=N_FOLDS, seed=FOLDS_SEED, splits_json=SPLITS_JSON)
+    folds = get_folds(dataset, case_ids(args.cache_dir), n_folds=N_FOLDS, seed=FOLDS_SEED)
 
     rows = []
     for fold in range(N_FOLDS):
-        pass1 = {s: load_net(run_checkpoint(PASS1_RUN, s, fold), device) for s in SEEDS}
-        pass2 = {s: load_net(run_checkpoint(PASS2_RUN, s, fold), device) for s in SEEDS}
+        pass1 = {s: load_net(dataset.checkpoint(dataset.pass1_run, s, fold), device) for s in SEEDS}
+        pass2 = {s: load_net(dataset.checkpoint(dataset.pass2_run, s, fold), device) for s in SEEDS}
         for cid in fold_split(folds, fold)[1][:args.limit or None]:
             img, aff = load_image(args.cache_dir, cid, 1)
             img = np.asarray(img, np.float32).squeeze()

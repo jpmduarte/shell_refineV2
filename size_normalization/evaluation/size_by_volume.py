@@ -13,18 +13,18 @@ import numpy as np
 from scipy.stats import spearmanr, wilcoxon
 
 from common.folds import N_FOLDS
-from common.paths import NORM_CACHE, PASS1_RUN, PASS2_RUN, SIZE_NORM_RUNS
+from datasets import add_dataset_argument, get as get_dataset
 
 SEEDS = (42, 43, 44)
 METRICS = ("dice_label", "hd95", "asd")
 
 
-def per_case(run: str) -> dict:
+def per_case(dataset, run: str) -> dict:
     """{case: {metric: mean over seeds}} for one run family."""
     scores = {}
     for s in SEEDS:
         for k in range(N_FOLDS):
-            path = os.path.join(SIZE_NORM_RUNS, f"{run}_s{s}", f"fold{k}", "eval_val", "summary.json")
+            path = os.path.join(dataset.runs, f"{run}_s{s}", f"fold{k}", "eval_val", "summary.json")
             with open(path) as f:
                 cases = json.load(f)["cases"]
             for c in cases:
@@ -58,13 +58,16 @@ def group_names(n_groups, three_names, prefix):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--plain", default=PASS1_RUN)
-    parser.add_argument("--norm", default=PASS2_RUN)
+    add_dataset_argument(parser)
+    parser.add_argument("--plain", default=None, help="default: the dataset's pass-1 run")
+    parser.add_argument("--norm", default=None, help="default: the dataset's pass-2 run")
     parser.add_argument("--groups", type=int, default=3, help="volume groups (3: terciles)")
     args = parser.parse_args()
+    dataset = get_dataset(args.dataset)
 
-    plain, norm = per_case(args.plain), per_case(args.norm)
-    with open(os.path.join(NORM_CACHE, "norm.json")) as f:
+    plain = per_case(dataset, args.plain or dataset.pass1_run)
+    norm = per_case(dataset, args.norm or dataset.pass2_run)
+    with open(os.path.join(dataset.norm_cache, "norm.json")) as f:
         meta = json.load(f)
     v0 = float(meta["v0_ml"])
     vol = {c: m["true_ml"] for c, m in meta["cases"].items()}

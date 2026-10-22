@@ -13,7 +13,6 @@ from monai.transforms import (Compose, EnsureChannelFirstd, Lambdad, LoadImaged,
                               NormalizeIntensityd, Orientationd)
 
 from common.geometry import FACTOR, downsample
-from common.paths import NATIVE_CACHE
 
 warnings.filterwarnings("ignore", category=UserWarning)   # MONAI's deprecation notices; the defaults used are checked
 
@@ -104,11 +103,14 @@ def case_ids(cache_dir):
 
 
 if __name__ == "__main__":
+    from datasets import add_dataset_argument, get as get_dataset
+
     parser = argparse.ArgumentParser(
         description="Build the image and label cache: <out-dir>/x1, x4 and label, one .npz per case.")
     parser.add_argument("--images-dir", required=True)
     parser.add_argument("--labels-dir", required=True)
-    parser.add_argument("--out-dir", default=NATIVE_CACHE)
+    parser.add_argument("--out-dir", default=None, help="default: the dataset's cache")
     parser.add_argument("--limit", type=int, default=0, help="only the first N cases (testing)")
+    add_dataset_argument(parser)
     args = parser.parse_args()
-    build(args.images_dir, args.labels_dir, args.out_dir, limit=args.limit)
+    build(args.images_dir, args.labels_dir, args.out_dir or get_dataset(args.dataset).cache, limit=args.limit)

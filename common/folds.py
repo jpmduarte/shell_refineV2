@@ -1,28 +1,20 @@
-"""The 5-fold split, grouped by patient and saved to splits.json so every run uses the same folds.
+"""The 5-fold split, grouped by patient and saved to the dataset's splits.json so every run uses the same folds.
 
-The 90 volumes come from 82 patients; two scans of one fetus are far more alike than two fetuses,
-so they must sit on the same side of a fold. Fold k validates on folds[k] and trains on the rest.
+Two scans of one patient are far more alike than two patients, so they must sit on the same side of
+a fold. Fold k validates on folds[k] and trains on the rest.
 """
 import json
 import os
-import re
+from typing import Callable
 
 import numpy as np
 
-from common.paths import SPLITS_JSON
-
 N_FOLDS = 5
 SEED = 42
-PATIENT_SERIES_ID = re.compile(r"^(\d+)_I\d+$")   # "21_I0000006" and "21_I0000008": patient 21
 
 
-def patient_of(case_id: str) -> str:
-    """The patient a case belongs to; a DICOM UID id has no patient field, so it counts as its own patient."""
-    match = PATIENT_SERIES_ID.match(case_id)
-    return f"P{match.group(1)}" if match else case_id
-
-
-def make_folds(case_ids: list[str], n_folds: int = N_FOLDS, seed: int = SEED) -> list[list[str]]:
+def make_folds(case_ids: list[str], patient_of: Callable[[str], str], n_folds: int = N_FOLDS,
+               seed: int = SEED) -> list[list[str]]:
     """Deal whole patients, largest first, each into the currently smallest fold (shuffled beforehand)."""
     cases_of_patient: dict[str, list[str]] = {}
     for cid in sorted(case_ids):
@@ -41,10 +33,10 @@ def make_folds(case_ids: list[str], n_folds: int = N_FOLDS, seed: int = SEED) ->
     return [sorted(f) for f in folds]
 
 
-def get_folds(case_ids: list[str] = None, n_folds: int = N_FOLDS, seed: int = SEED,
+def get_folds(dataset, case_ids: list[str] = None, n_folds: int = N_FOLDS, seed: int = SEED,
               splits_json: str = None) -> list[list[str]]:
-    """The saved folds, or built and saved when the file does not exist."""
-    path = splits_json or SPLITS_JSON
+    """The dataset's saved folds, or built and saved when the file does not exist; splits_json overrides its path."""
+    path = splits_json or dataset.splits_json
 
     if os.path.exists(path):
         with open(path) as f:
@@ -59,8 +51,9 @@ def get_folds(case_ids: list[str] = None, n_folds: int = N_FOLDS, seed: int = SE
     if case_ids is None:
         raise RuntimeError(f"{path} does not exist and no case_ids were given to build it")
 
-    folds = make_folds(case_ids, n_folds, seed)
-    n_patients = len({patient_of(c) for c in case_ids})
+    folds = make_folds(case_ids, dataset.patient_of, n_folds, seed)
+    n_patients = len({dataset.patient_of(c) for c in case_ids})
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(path, "w") as f:
         json.dump({"folds": folds, "grouped_by_patient": True,
                    "n_patients": n_patients, "seed": seed}, f, indent=2)

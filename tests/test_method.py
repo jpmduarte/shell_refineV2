@@ -21,12 +21,13 @@ import torch
 from common.geometry import CUBE, affine_resample, spacing_grid
 from common.image_cache import load, load_label
 from common.metrics import mask_dice
-from common.paths import NATIVE_CACHE, NORM_CACHE, PASS1_RUN, PASS2_RUN, SIZE_NORM_DIR, SIZE_NORM_RUNS, run_checkpoint
+from common.paths import SIZE_NORM_DIR
+from datasets import FETAL_HEAD as FETAL
 from size_normalization.infer import POOLING_MULTIPLE, load_net, pad, segment, segment_plain
 
 CASE = "11_I0000071"   # fold 0, validation
 V0_ML = 130.0
-HAVE_DATA = os.path.isdir(NATIVE_CACHE) and os.path.isdir(os.path.join(SIZE_NORM_RUNS, f"{PASS2_RUN}_s42"))
+HAVE_DATA = os.path.isdir(FETAL.cache) and os.path.isdir(os.path.join(FETAL.runs, f"{FETAL.pass2_run}_s42"))
 HAVE_GPU = torch.cuda.is_available()
 needs_data = unittest.skipUnless(HAVE_DATA and HAVE_GPU, "needs caches/, the runs and a GPU")
 
@@ -36,12 +37,12 @@ REFERENCE_LOSSES = [1.2039, 1.0418]   # train.py --fold 1 --seed 42, epochs 1 an
 
 
 def load_case():
-    img, aff = load(NATIVE_CACHE, CASE, 1)
+    img, aff = load(FETAL.cache, CASE, 1)
     return np.asarray(img, np.float32).squeeze(), aff
 
 
 def case_label():
-    return np.asarray(load_label(NATIVE_CACHE, CASE)[0]).squeeze().astype(bool)
+    return np.asarray(load_label(FETAL.cache, CASE)[0]).squeeze().astype(bool)
 
 
 def run_script(*args):
@@ -76,8 +77,8 @@ class Guard(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.device = torch.device("cuda")
-        cls.pass1 = load_net(run_checkpoint(PASS1_RUN, 42, 0), cls.device)
-        cls.norm = load_net(run_checkpoint(PASS2_RUN, 42, 0), cls.device)
+        cls.pass1 = load_net(FETAL.checkpoint(FETAL.pass1_run, 42, 0), cls.device)
+        cls.norm = load_net(FETAL.checkpoint(FETAL.pass2_run, 42, 0), cls.device)
         cls.img, cls.aff = load_case()
 
     def test_normal_case_is_normalised(self):
@@ -105,7 +106,7 @@ class Reproduce(unittest.TestCase):
     """The stored evaluation of each run (eval_val/summary.json) against a fresh prediction."""
 
     def scores(self, run):
-        with open(os.path.join(SIZE_NORM_RUNS, f"{run}_s42", "fold0", "eval_val", "summary.json")) as f:
+        with open(os.path.join(FETAL.runs, f"{run}_s42", "fold0", "eval_val", "summary.json")) as f:
             cases = json.load(f)["cases"]
         return next(c for c in cases if c["case"] == CASE)
 
@@ -116,13 +117,13 @@ class Reproduce(unittest.TestCase):
             return mask_dice(sdf < 0, case_label())
 
     def test_plain_x4(self):
-        self.assertAlmostEqual(self.predict("--checkpoint", run_checkpoint(PASS1_RUN, 42, 0)),
-                               self.scores(PASS1_RUN)["dice_label"], delta=1e-4)
+        self.assertAlmostEqual(self.predict("--checkpoint", FETAL.checkpoint(FETAL.pass1_run, 42, 0)),
+                               self.scores(FETAL.pass1_run)["dice_label"], delta=1e-4)
 
     def test_size_normalised(self):
         # The stored number came from a cache whose pass-1 volume was measured slightly differently (median 0.1%).
-        dice = self.predict("--pass1", run_checkpoint(PASS1_RUN, 42, 0), "--checkpoint", run_checkpoint(PASS2_RUN, 42, 0))
-        self.assertAlmostEqual(dice, self.scores(PASS2_RUN)["dice_label"], delta=2e-3)
+        dice = self.predict("--pass1", FETAL.checkpoint(FETAL.pass1_run, 42, 0), "--checkpoint", FETAL.checkpoint(FETAL.pass2_run, 42, 0))
+        self.assertAlmostEqual(dice, self.scores(FETAL.pass2_run)["dice_label"], delta=2e-3)
         self.assertAlmostEqual(dice, REFERENCE_NORM_DICE, delta=1e-5)
 
 
@@ -134,8 +135,8 @@ class Segment(unittest.TestCase):
         import nibabel as nib
         img, aff = load_case()
         device = torch.device("cuda")
-        field, _ = segment(img, aff, load_net(run_checkpoint(PASS1_RUN, 42, 0), device),
-                           [load_net(run_checkpoint(PASS2_RUN, 42, 0), device)], V0_ML, device=device)
+        field, _ = segment(img, aff, load_net(FETAL.checkpoint(FETAL.pass1_run, 42, 0), device),
+                           [load_net(FETAL.checkpoint(FETAL.pass2_run, 42, 0), device)], V0_ML, device=device)
         expected = (field < 0).cpu().numpy()
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -158,7 +159,7 @@ class Segment(unittest.TestCase):
         self.assertTrue(np.array_equal(m_lps[::-1, ::-1].astype(bool), expected))
 
 
-@unittest.skipUnless(os.path.isdir(NORM_CACHE), "needs caches/cache_norm4")
+@unittest.skipUnless(os.path.isdir(FETAL.norm_cache), "needs caches/cache_norm4")
 class Cache(unittest.TestCase):
 
     def test_size_norm_rebuild_identical(self):
@@ -172,7 +173,7 @@ class Cache(unittest.TestCase):
                 for sub, key in (("x4", "img"), (os.path.join("sdf", "x4"), "sdf"),
                                  (os.path.join("sdf", "x4mm"), "sdf")):
                     with np.load(os.path.join(dst, sub, cid)) as new, \
-                         np.load(os.path.join(NORM_CACHE, sub, cid)) as old:
+                         np.load(os.path.join(FETAL.norm_cache, sub, cid)) as old:
                         self.assertTrue(np.array_equal(new[key], old[key]), sub)
                         self.assertTrue(np.array_equal(new["affine"], old["affine"]), sub)
             finally:

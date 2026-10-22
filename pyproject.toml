@@ -9,4 +9,4 @@ description = "Fetal head segmentation in 3D ultrasound by size-normalised SDF r
 requires-python = ">=3.10"
 
 [tool.setuptools.packages.find]
-include = ["common*", "size_normalization*", "boundary_refiner*"]
+include = ["common*", "datasets*", "size_normalization*", "boundary_refiner*"]

@@ -11,8 +11,8 @@ import numpy as np
 
 from common.geometry import FACTOR, downsample, voxel_spacing
 from common.image_cache import case_ids, load_label
-from common.paths import NATIVE_CACHE
 from common.sdf_targets import TRUNC_MM, as_resamplable, normalise, signed_distance_mm
+from datasets import add_dataset_argument, get as get_dataset
 
 MS_PER_S = 1e3
 
@@ -41,10 +41,12 @@ def time_case(label, affine) -> dict:
 def main():
     parser = argparse.ArgumentParser(description=__doc__, epilog=USAGE,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--cache-dir", default=NATIVE_CACHE)
+    add_dataset_argument(parser)
+    parser.add_argument("--cache-dir", default=None, help="default: the dataset's cache")
     parser.add_argument("--limit", type=int, default=0, help="only the first N cases")
     parser.add_argument("--out", default=None, help="write the results as JSON here")
     args = parser.parse_args()
+    args.cache_dir = args.cache_dir or get_dataset(args.dataset).cache
 
     rows = []
     for i, cid in enumerate(case_ids(args.cache_dir)[:args.limit or None], start=1):

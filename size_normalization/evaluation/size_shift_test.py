@@ -16,10 +16,10 @@ from common.folds import N_FOLDS, SEED as FOLDS_SEED, fold_split, get_folds
 from common.geometry import MM3_PER_ML, affine_resample, isotropic_spacing, spacing_grid
 from common.image_cache import case_ids, load as load_image
 from common.metrics import mask_dice
-from common.paths import NATIVE_CACHE, NORM_CACHE, PASS1_RUN, PASS2_RUN, SIZE_NORM_RUNS, SPLITS_JSON, run_checkpoint
 from common.sdf_targets import load as load_sdf
+from datasets import add_dataset_argument, get as get_dataset
 from size_normalization.build_cache import reference_v0
-from size_normalization.infer import K_RANGE, OUTSIDE_SDF, load_net, segment, segment_plain
+from size_normalization.infer import OUTSIDE_SDF, load_net, segment, segment_plain
 
 USAGE = """\
 examples:
@@ -41,17 +41,26 @@ def parse_args():
                         help="linear head scales; the volume changes by s^3")
     parser.add_argument("--fold", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--cache-dir", default=NATIVE_CACHE)
-    parser.add_argument("--reference", default=NORM_CACHE,
-                        help="the normalised network's training cache: its norm.json gives V0")
-    parser.add_argument("--k-range", type=float, nargs=2, default=list(K_RANGE),
-                        help="pass-1 scales accepted by the normalised method; outside: pass 1's mask")
-    parser.add_argument("--plain-run", default=PASS1_RUN,
+    add_dataset_argument(parser)
+    parser.add_argument("--cache-dir", default=None, help="default: the dataset's cache")
+    parser.add_argument("--reference", default=None,
+                        help="the normalised network's training cache, whose norm.json gives V0; default: the dataset's")
+    parser.add_argument("--k-range", type=float, nargs=2, default=None,
+                        help="pass-1 scales accepted by the normalised method; outside: pass 1's mask. "
+                             "Default: the dataset's")
+    parser.add_argument("--plain-run", default=None,
                         help="the run family scored as the plain method (e.g. nnaug_x4strongscale, "
-                             "trained with strong scaling); pass 1 of the normalised method stays "
-                             f"{PASS1_RUN}")
-    parser.add_argument("--out", default=None, help="default: runs/size_shift[_<plain-run>]_fold<k>_s<seed>.json")
-    return parser.parse_args()
+                             "trained with strong scaling); pass 1 of the normalised method stays the "
+                             "dataset's pass-1 run. Default: that run")
+    parser.add_argument("--out", default=None,
+                        help="default: <the dataset's runs>/size_shift[_<plain-run>]_fold<k>_s<seed>.json")
+    args = parser.parse_args()
+    dataset = get_dataset(args.dataset)
+    args.cache_dir = args.cache_dir or dataset.cache
+    args.reference = args.reference or dataset.norm_cache
+    args.k_range = tuple(args.k_range) if args.k_range else dataset.k_range
+    args.plain_run = args.plain_run or dataset.pass1_run
+    return args
 
 
 def print_scale_summary(s, rows):
@@ -69,19 +78,20 @@ def print_scale_summary(s, rows):
 
 def main():
     args = parse_args()
-    tag = "" if args.plain_run == PASS1_RUN else f"_{args.plain_run}"
-    out = args.out or os.path.join(SIZE_NORM_RUNS, f"size_shift{tag}_fold{args.fold}_s{args.seed}.json")
+    dataset = get_dataset(args.dataset)
+    tag = "" if args.plain_run == dataset.pass1_run else f"_{args.plain_run}"
+    out = args.out or os.path.join(dataset.runs, f"size_shift{tag}_fold{args.fold}_s{args.seed}.json")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def net(run):
-        return load_net(run_checkpoint(run, args.seed, args.fold), device)
+        return load_net(dataset.checkpoint(run, args.seed, args.fold), device)
 
-    pass1 = net(PASS1_RUN)
-    norm = net(PASS2_RUN)
-    plain = net(args.plain_run) if args.plain_run != PASS1_RUN else pass1
+    pass1 = net(dataset.pass1_run)
+    norm = net(dataset.pass2_run)
+    plain = net(args.plain_run) if args.plain_run != dataset.pass1_run else pass1
     v0_ml = reference_v0(args.reference)
-    folds = get_folds(case_ids(args.cache_dir), n_folds=N_FOLDS, seed=FOLDS_SEED, splits_json=SPLITS_JSON)
+    folds = get_folds(dataset, case_ids(args.cache_dir), n_folds=N_FOLDS, seed=FOLDS_SEED)
     _, cases = fold_split(folds, args.fold)
 
     rows = []
@@ -93,7 +103,7 @@ def main():
             label = (zoom(sdf1.squeeze(), aff1, s, OUTSIDE_SDF, device) < 0).cpu()
 
             mask_plain = (segment_plain(img, aff1, [plain], False, device) < 0).cpu()
-            field, estimate = segment(img, aff1, pass1, [norm], v0_ml, False, device, k_range=tuple(args.k_range))
+            field, estimate = segment(img, aff1, pass1, [norm], v0_ml, False, device, k_range=args.k_range)
             mask_norm = (field < 0).cpu()
 
             rows.append({"scale": s, "case": cid,
